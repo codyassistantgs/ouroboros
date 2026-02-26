@@ -2,10 +2,12 @@ services:
   ouroboros:
     build: .
     restart: on-failure
+    network_mode: host
     cpus: 1.0
     mem_limit: 2g
     env_file: .env
     volumes:
       - ouroboros-data:/data
+      - /home/gocha/.claude:/home/ouroboros/.claude:ro
 volumes:
   ouroboros-data:
