@@ -101,9 +101,11 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         cost = float(evt.get("cost_usd") or 0)
         rounds = int(evt.get("total_rounds") or 0)
 
-        # Heuristic: if cost > $0.10 and rounds >= 1, consider it successful
-        # Empty responses typically cost < $0.01 and have 0-1 rounds
-        if cost > 0.10 and rounds >= 1:
+        # Heuristic: if cost > $0.10 OR substantial tokens generated, consider it successful.
+        # When using claude-proxy, cost is always $0 — so fall back to completion_tokens.
+        # Empty/failed responses have near-zero tokens; real work produces hundreds.
+        completion_tokens = int(evt.get("completion_tokens") or 0)
+        if (cost > 0.10 or completion_tokens > 200) and rounds >= 1:
             # Success: reset failure counter
             st["evolution_consecutive_failures"] = 0
             ctx.save_state(st)
