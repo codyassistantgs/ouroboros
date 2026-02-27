@@ -65,9 +65,16 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "") -> str:
 
     work_dir = ctx.repo_dir
     if cwd and cwd.strip() not in ("", ".", "./"):
-        candidate = (ctx.repo_dir / cwd).resolve()
+        # Support both absolute paths and paths relative to repo_dir
+        cwd_path = pathlib.Path(cwd)
+        if cwd_path.is_absolute():
+            candidate = cwd_path.resolve()
+        else:
+            candidate = (ctx.repo_dir / cwd).resolve()
         if candidate.exists() and candidate.is_dir():
             work_dir = candidate
+        else:
+            return f"⚠️ SHELL_CWD_ERROR: cwd '{cwd}' does not exist or is not a directory. Aborting to avoid silent fallback to repo root."
 
     try:
         res = subprocess.run(
@@ -199,7 +206,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
     """Delegate code edits to Claude Code CLI."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
 
-    api_key = os.environ["ANTHROPIC_API_KEY"]
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
 
     work_dir = str(ctx.repo_dir)
     if cwd and cwd.strip() not in ("", ".", "./"):
@@ -223,7 +230,8 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "") -> str:
         )
 
         env = os.environ.copy()
-        env["ANTHROPIC_API_KEY"] = api_key
+        if api_key:
+            env["ANTHROPIC_API_KEY"] = api_key
         local_bin = str(pathlib.Path.home() / ".local" / "bin")
         if local_bin not in env.get("PATH", ""):
             env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"

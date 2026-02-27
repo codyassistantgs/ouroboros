@@ -8,6 +8,6 @@ services:
     env_file: .env
     volumes:
       - ouroboros-data:/data
-      - /home/gocha/.claude:/home/ouroboros/.claude:ro
+      - /home/gocha/.claude:/home/ouroboros/.claude
 volumes:
   ouroboros-data:

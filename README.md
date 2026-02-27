@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.0 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.2 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,14 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.2 -- Fix pyproject.toml version desync + run_shell cwd safety
+- **Fix:** `pyproject.toml` version was stuck at 7.1.0 while VERSION was 7.1.1, triggering CRITICAL health alarm on every LLM context build. Now both files are in sync at 7.1.2.
+- **Fix:** `run_shell` now supports absolute `cwd` paths (not just repo-relative), and returns an explicit error instead of silently falling back to repo root when `cwd` is invalid.
+
+### v7.1.1 -- Fix evolution: .claude read-write mount + ANTHROPIC_API_KEY fallback
+- **Fix:** Mount `.claude` as read-write so `claude -p` can write debug/todo files (was failing with EROFS)
+- **Fix:** `_claude_code_edit` no longer crashes on missing ANTHROPIC_API_KEY -- falls back to stored Claude credentials
 
 ### v7.1.0 -- Claude Code CLI as sole code editing path
 - **ANTHROPIC_API_KEY is now required** -- Claude Code CLI is the only way the agent edits its own code.
