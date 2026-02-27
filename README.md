@@ -222,6 +222,11 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
+### v7.1.3 -- Fix budget tracking: proxy cost now reaches spent_usd
+- **Fix:** `_handle_llm_usage` in events.py was passing raw API usage dict (cost=0 from proxy) to `update_budget_from_usage`, ignoring the estimated cost computed in loop.py. `spent_usd` was stuck at $0.0 despite 144+ calls and 15M+ tokens.
+- **Fix:** `_estimate_cost` in loop.py now maps proxy short model names (e.g. `claude-sonnet-4-6`) to canonical OpenRouter IDs (e.g. `anthropic/claude-sonnet-4.6`) via `_PROXY_MODEL_ALIASES` dict. Gemini and future proxy models also covered.
+- **Result:** Budget tracking now works correctly — `spent_usd` accumulates, budget enforcement and reporting to user are accurate.
+
 ### v7.1.2 -- Fix pyproject.toml version desync + run_shell cwd safety
 - **Fix:** `pyproject.toml` version was stuck at 7.1.0 while VERSION was 7.1.1, triggering CRITICAL health alarm on every LLM context build. Now both files are in sync at 7.1.2.
 - **Fix:** `run_shell` now supports absolute `cwd` paths (not just repo-relative), and returns an explicit error instead of silently falling back to repo root when `cwd` is invalid.

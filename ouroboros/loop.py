@@ -82,18 +82,37 @@ def _get_pricing() -> Dict[str, Tuple[float, float, float]]:
 
         return _cached_pricing
 
+# Map short proxy model names → canonical OpenRouter model IDs for pricing lookup.
+# The proxy returns short names (e.g. "claude-sonnet-4-6") but pricing table uses
+# full IDs (e.g. "anthropic/claude-sonnet-4.6"). Add aliases here when proxy adds models.
+_PROXY_MODEL_ALIASES: Dict[str, str] = {
+    "claude-sonnet-4-6": "anthropic/claude-sonnet-4.6",
+    "claude-sonnet-4.6": "anthropic/claude-sonnet-4.6",
+    "claude-opus-4-6": "anthropic/claude-opus-4.6",
+    "claude-opus-4.6": "anthropic/claude-opus-4.6",
+    "claude-haiku-4-5-20251001": "anthropic/claude-haiku-4-5-20251001",
+    "gemini-2.5-pro": "google/gemini-2.5-pro-preview",
+    "gemini-2.5-flash": "google/gemini-2.5-flash-preview",
+    "gemini-3-pro-preview": "google/gemini-3-pro-preview",
+}
+
+
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
                    cached_tokens: int = 0, cache_write_tokens: int = 0) -> float:
     """Estimate cost from token counts using known pricing. Returns 0 if model unknown."""
     model_pricing = _get_pricing()
+    # Normalize short proxy model names to canonical IDs
+    normalized = _PROXY_MODEL_ALIASES.get(model, model)
     # Try exact match first
-    pricing = model_pricing.get(model)
+    pricing = model_pricing.get(normalized)
+    if not pricing and normalized != model:
+        pricing = model_pricing.get(model)
     if not pricing:
-        # Try longest prefix match
+        # Try longest prefix match (handles versioned model IDs)
         best_match = None
         best_length = 0
         for key, val in model_pricing.items():
-            if model and model.startswith(key):
+            if normalized and normalized.startswith(key):
                 if len(key) > best_length:
                     best_match = val
                     best_length = len(key)
@@ -109,6 +128,56 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
         + completion_tokens * output_price / 1_000_000
     )
     return round(cost, 6)
+
+def _extract_retry_after(exc: Exception) -> Optional[float]:
+    """Extract Retry-After delay (in seconds) from an API rate-limit exception.
+
+    Handles three cases:
+    1. Exception has a .response attribute with Retry-After header (openai SDK)
+    2. Exception message contains "retry after N" or "Retry-After: N"
+    3. Returns None if no information is available (caller uses default backoff)
+    """
+    import re as _re
+
+    # Case 1: openai SDK exceptions carry the raw httpx response
+    response = getattr(exc, "response", None)
+    if response is not None:
+        headers = getattr(response, "headers", {}) or {}
+        raw = headers.get("retry-after") or headers.get("Retry-After") or headers.get("x-ratelimit-reset-requests")
+        if raw:
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                pass
+
+    # Case 2: extract from the exception string
+    error_str = repr(exc)
+    patterns = [
+        r"retry.?after['\s:]+(\d+(?:\.\d+)?)",
+        r"reset.?in['\s:]+(\d+(?:\.\d+)?)\s*s",
+        r"x-ratelimit-reset-requests['\s:]+(\d+(?:\.\d+)?)",
+    ]
+    for pattern in patterns:
+        m = _re.search(pattern, error_str, _re.IGNORECASE)
+        if m:
+            try:
+                return float(m.group(1))
+            except (ValueError, TypeError):
+                pass
+
+    return None
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Return True if the exception looks like an HTTP 429 rate-limit error."""
+    error_str = repr(exc)
+    return (
+        "429" in error_str
+        or "RateLimitError" in type(exc).__name__
+        or "rate limit" in error_str.lower()
+        or "too many requests" in error_str.lower()
+    )
+
 
 READ_ONLY_PARALLEL_TOOLS = frozenset({
     "repo_read", "repo_list",
@@ -910,14 +979,38 @@ def _call_llm_with_retry(
 
         except Exception as e:
             last_error = e
+            is_rate_limit = _is_rate_limit_error(e)
+
+            # Determine sleep duration before next retry
+            if is_rate_limit:
+                # Respect Retry-After header if present; otherwise exponential backoff
+                # capped at 3600s (rate limits can reset daily, IMPROVE.md lesson #4)
+                retry_after = _extract_retry_after(e)
+                if retry_after is not None:
+                    sleep_sec = min(float(retry_after) + 1.0, 3600.0)
+                else:
+                    # Exponential backoff: 30s, 120s, 480s ... capped at 3600s
+                    sleep_sec = min(30 * (4 ** attempt), 3600.0)
+            else:
+                # Non-rate-limit error: fast backoff (2s, 4s)
+                sleep_sec = min(2 ** attempt * 2, 30)
+
             append_jsonl(drive_logs / "events.jsonl", {
                 "ts": utc_now_iso(), "type": "llm_api_error",
                 "task_id": task_id,
                 "round": round_idx, "attempt": attempt + 1,
                 "model": model, "error": repr(e),
+                "is_rate_limit": is_rate_limit,
+                "sleep_sec": sleep_sec if attempt < max_retries - 1 else 0,
             })
+
             if attempt < max_retries - 1:
-                time.sleep(min(2 ** attempt * 2, 30))
+                if is_rate_limit:
+                    log.warning(
+                        "Rate limit hit (attempt %d/%d), sleeping %.0fs before retry",
+                        attempt + 1, max_retries, sleep_sec,
+                    )
+                time.sleep(sleep_sec)
 
     return None, 0.0
 

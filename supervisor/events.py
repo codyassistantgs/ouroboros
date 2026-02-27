@@ -22,7 +22,12 @@ log = logging.getLogger(__name__)
 
 
 def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
-    usage = evt.get("usage") or {}
+    usage = dict(evt.get("usage") or {})
+    # Cost may be estimated at event top level (when proxy returns cost=0).
+    # Ensure usage dict carries it so update_budget_from_usage can record it.
+    top_level_cost = float(evt.get("cost") or 0)
+    if not usage.get("cost") and top_level_cost:
+        usage["cost"] = top_level_cost
     ctx.update_budget_from_usage(usage)
 
     # Log to events.jsonl for audit trail
