@@ -92,25 +92,46 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     wid = evt.get("worker_id")
 
     # Track evolution task success/failure for circuit breaker
+    _evolution_committed = False
     if task_type == "evolution":
+        import subprocess as _sp
         st = ctx.load_state()
-        # Check if task produced meaningful output (successful evolution)
-        # A successful evolution should have:
-        # - Reasonable cost (not near-zero, indicating actual work)
-        # - Multiple rounds (not just 1 retry)
+
+        # Primary heuristic: did evolution actually commit new code?
+        _repo_dir = "/home/gocha/ouroboros"
+        try:
+            _git = _sp.run(
+                ["git", "-C", _repo_dir, "log", "--oneline", "--since=35 minutes ago"],
+                capture_output=True, text=True, timeout=10,
+            )
+            _evolution_committed = bool(_git.returncode == 0 and _git.stdout.strip())
+        except Exception:
+            _evolution_committed = False
+
+        # Fallback heuristic (non-proxy setups): cost or tokens
         cost = float(evt.get("cost_usd") or 0)
         rounds = int(evt.get("total_rounds") or 0)
-
-        # Heuristic: if cost > $0.10 OR substantial tokens generated, consider it successful.
-        # When using claude-proxy, cost is always $0 — so fall back to completion_tokens.
-        # Empty/failed responses have near-zero tokens; real work produces hundreds.
         completion_tokens = int(evt.get("completion_tokens") or 0)
-        if (cost > 0.10 or completion_tokens > 200) and rounds >= 1:
-            # Success: reset failure counter
+        _text_success = (cost > 0.10 or completion_tokens > 200) and rounds >= 1
+
+        if _evolution_committed:
+            # Real success: new code committed to git
+            st["evolution_consecutive_failures"] = 0
+            ctx.save_state(st)
+            ctx.append_jsonl(
+                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "evolution_committed",
+                    "task_id": task_id,
+                },
+            )
+        elif _text_success:
+            # Meaningful text response but no commits yet — not failed, just no code change
             st["evolution_consecutive_failures"] = 0
             ctx.save_state(st)
         else:
-            # Likely failure (empty response or minimal work)
+            # Likely failure (empty or minimal response)
             failures = int(st.get("evolution_consecutive_failures") or 0) + 1
             st["evolution_consecutive_failures"] = failures
             ctx.save_state(st)
@@ -131,6 +152,28 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     if wid in ctx.WORKERS and ctx.WORKERS[wid].busy_task_id == task_id:
         ctx.WORKERS[wid].busy_task_id = None
     ctx.persist_queue_snapshot(reason="task_done")
+
+    # If evolution committed new code, restart to load it
+    if _evolution_committed:
+        try:
+            _st = ctx.load_state()
+            if _st.get("owner_chat_id"):
+                ctx.send_with_budget(
+                    int(_st["owner_chat_id"]),
+                    "🧬✅ Evolution committed new code. Restarting to load changes..."
+                )
+            ok, msg = ctx.safe_restart(reason="evolution_committed", unsynced_policy="rescue_and_reset")
+            if ok:
+                ctx.kill_workers()
+                _st2 = ctx.load_state()
+                _st2["session_id"] = uuid.uuid4().hex
+                ctx.save_state(_st2)
+                ctx.persist_queue_snapshot(reason="pre_evolution_restart")
+                sys.exit(1)
+            else:
+                log.warning("Evolution restart skipped: %s", msg)
+        except Exception as _e:
+            log.warning("Evolution auto-restart failed: %s", _e)
 
     # Store task result for subtask retrieval
     try:
