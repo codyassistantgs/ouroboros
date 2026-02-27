@@ -286,10 +286,14 @@ class BackgroundConsciousness:
             })
 
         except Exception as e:
+            error_str = repr(e)
+            # Rate limit: back off exponentially instead of hammering the API
+            if "429" in error_str or "RateLimit" in error_str or "rate limit" in error_str.lower():
+                self._next_wakeup_sec = min(self._next_wakeup_sec * 3, 3600)
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "consciousness_llm_error",
-                "error": repr(e),
+                "error": error_str,
             })
 
     # -------------------------------------------------------------------
