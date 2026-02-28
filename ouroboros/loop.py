@@ -363,7 +363,13 @@ def _check_budget_limits(
             log.warning("Failed to get final response after budget limit", exc_info=True)
             return finish_reason, accumulated_usage, llm_trace
     elif budget_pct > 0.3 and round_idx % 10 == 0:
-        # Soft nudge every 10 rounds when spending is significant
+        # Soft nudge every 10 rounds when spending is significant.
+        # Remove any previous budget nudge first to prevent accumulation over long tasks.
+        messages[:] = [
+            m for m in messages
+            if not (m.get("role") == "system" and
+                    str(m.get("content", "")).startswith("[INFO] Task spent $"))
+        ]
         messages.append({"role": "system", "content": f"[INFO] Task spent ${task_cost:.3f} of ${budget_remaining_usd:.2f}. Wrap up if possible."})
 
     return None

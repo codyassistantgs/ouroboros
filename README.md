@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.6 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.7 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,10 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.7 -- O(n) compact_tool_history + budget nudge dedup
+- **Perf:** `compact_tool_history` and `compact_tool_history_llm` now precompute a parent-round mapping in a single O(n) pass, eliminating the O(n×k) inner reverse-search loop over long tool-use conversations.
+- **Token efficiency:** Budget soft-nudge messages (`[INFO] Task spent $…`) are now deduplicated before each append — old nudges are pruned so they don't accumulate unboundedly in the context across 100+ round tasks.
 
 ### v7.1.5 -- Fix e2e harness: git identity for isolated test repos
 - **Fix:** E2E test harness  now configures  and  in the isolated temp repo before the initial commit, so tests pass in CI environments with no global git config.

@@ -640,6 +640,16 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
     # Rounds to compact: all except the last keep_recent
     rounds_to_compact = set(tool_round_starts[:-keep_recent])
 
+    # Precompute: for each tool-result message index, find its parent tool-round start.
+    # Single O(n) pass avoids the O(n*k) inner reverse-search loop.
+    msg_to_parent_round: Dict[int, int] = {}
+    _last_round_start: Optional[int] = None
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            _last_round_start = i
+        elif msg.get("role") == "tool" and _last_round_start is not None:
+            msg_to_parent_round[i] = _last_round_start
+
     # Build compacted message list
     result = []
     for i, msg in enumerate(messages):
@@ -648,16 +658,8 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
             result.append(msg)
             continue
 
-        if msg.get("role") == "tool" and i > 0:
-            # Check if the preceding assistant message (with tool_calls)
-            # is one we want to compact
-            # Find which round this tool result belongs to
-            parent_round = None
-            for rs in reversed(tool_round_starts):
-                if rs < i:
-                    parent_round = rs
-                    break
-
+        if msg.get("role") == "tool":
+            parent_round = msg_to_parent_round.get(i)
             if parent_round is not None and parent_round in rounds_to_compact:
                 # Compact this tool result
                 content = str(msg.get("content") or "")
@@ -691,15 +693,20 @@ def compact_tool_history_llm(messages: list, keep_recent: int = 6) -> list:
 
     rounds_to_compact = set(tool_round_starts[:-keep_recent])
 
+    # Precompute parent-round mapping in O(n) — avoids O(n*k) inner search
+    msg_to_parent_round_llm: Dict[int, int] = {}
+    _last_rs: Optional[int] = None
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            _last_rs = i
+        elif msg.get("role") == "tool" and _last_rs is not None:
+            msg_to_parent_round_llm[i] = _last_rs
+
     old_results = []
     for i, msg in enumerate(messages):
-        if msg.get("role") != "tool" or i == 0:
+        if msg.get("role") != "tool":
             continue
-        parent_round = None
-        for rs in reversed(tool_round_starts):
-            if rs < i:
-                parent_round = rs
-                break
+        parent_round = msg_to_parent_round_llm.get(i)
         if parent_round is not None and parent_round in rounds_to_compact:
             content = str(msg.get("content") or "")
             if len(content) > 120:
@@ -767,12 +774,9 @@ def compact_tool_history_llm(messages: list, keep_recent: int = 6) -> list:
         if i in idx_to_summary:
             result.append({**msg, "content": idx_to_summary[i]})
             continue
-        if msg.get("role") == "tool" and i > 0:
-            parent_round = None
-            for rs in reversed(tool_round_starts):
-                if rs < i:
-                    parent_round = rs
-                    break
+        if msg.get("role") == "tool":
+            # Use precomputed mapping (O(1) lookup instead of O(k) reverse search)
+            parent_round = msg_to_parent_round_llm.get(i)
             if parent_round is not None and parent_round in rounds_to_compact:
                 content = str(msg.get("content") or "")
                 result.append(_compact_tool_result(msg, content))
