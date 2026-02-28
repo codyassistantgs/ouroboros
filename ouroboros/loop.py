@@ -512,6 +512,25 @@ def _drain_incoming_messages(
                     pass
 
 
+def _maybe_compact_messages(
+    messages: List[Dict[str, Any]],
+    tools: ToolRegistry,
+    round_idx: int,
+) -> List[Dict[str, Any]]:
+    """Compact old tool history if needed (LLM-requested or round threshold)."""
+    pending_compaction = getattr(tools._ctx, '_pending_compaction', None)
+    if pending_compaction is not None:
+        messages = compact_tool_history_llm(messages, keep_recent=pending_compaction)
+        tools._ctx._pending_compaction = None
+    elif round_idx > 8:
+        messages = compact_tool_history(messages, keep_recent=6)
+    elif round_idx > 3:
+        # Light compaction: only if messages list is very long (>60 items)
+        if len(messages) > 60:
+            messages = compact_tool_history(messages, keep_recent=6)
+    return messages
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -550,8 +569,15 @@ def run_llm_loop(
     _td.set_registry(tools)
 
     # Selective tool schemas: core set + meta-tools for discovery.
-    tool_schemas = tools.schemas(core_only=True)
-    tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages)
+    # Evolution tasks: no Ouroboros tool schemas — Claude uses native CLI tools internally
+    # (Read/Write/Edit/Bash via claude -p subprocess). Fallback models (Gemini/Groq) would
+    # get confused by Ouroboros tool schemas since the proxy can't execute them.
+    if task_type == "evolution":
+        tool_schemas = []
+        _enabled_extra_tools = set()
+    else:
+        tool_schemas = tools.schemas(core_only=True)
+        tool_schemas, _enabled_extra_tools = _setup_dynamic_tools(tools, tool_schemas, messages)
 
     # Set budget tracking on tool context for real-time usage events
     tools._ctx.event_queue = event_queue
@@ -601,18 +627,8 @@ def run_llm_loop(
             # Inject owner messages (in-process queue + Drive mailbox)
             _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
 
-            # Compact old tool history when needed
-            # Check for LLM-requested compaction first (via compact_context tool)
-            pending_compaction = getattr(tools._ctx, '_pending_compaction', None)
-            if pending_compaction is not None:
-                messages = compact_tool_history_llm(messages, keep_recent=pending_compaction)
-                tools._ctx._pending_compaction = None
-            elif round_idx > 8:
-                messages = compact_tool_history(messages, keep_recent=6)
-            elif round_idx > 3:
-                # Light compaction: only if messages list is very long (>60 items)
-                if len(messages) > 60:
-                    messages = compact_tool_history(messages, keep_recent=6)
+            # Compact old tool history when needed (LLM-requested or round threshold)
+            messages = _maybe_compact_messages(messages, tools, round_idx)
 
             # --- LLM call with retry ---
             msg, cost = _call_llm_with_retry(
@@ -622,6 +638,15 @@ def run_llm_loop(
 
             # Fallback to another model if primary model returns empty responses
             if msg is None:
+                # Evolution tasks: no fallback — only claude-p (native CLI tools) works correctly.
+                # Gemini/Groq without tool schemas would just return text descriptions of changes,
+                # not actual code modifications.
+                if task_type == "evolution":
+                    return (
+                        f"⚠️ Evolution: model {active_model} returned empty response after {max_retries} attempts. "
+                        f"No fallback for evolution tasks (requires Claude native tools)."
+                    ), accumulated_usage, llm_trace
+
                 # Configurable fallback priority list (Bible P3: no hardcoded behavior)
                 fallback_list_raw = os.environ.get(
                     "OUROBOROS_MODEL_FALLBACK_LIST",
