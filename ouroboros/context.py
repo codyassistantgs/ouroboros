@@ -296,6 +296,50 @@ def _build_health_invariants(env: Any) -> str:
     return "## Health Invariants\n\n" + "\n".join(f"- {c}" for c in checks)
 
 
+# Minimal system prompt for evolution tasks.
+# Deliberately EXCLUDES the full conversational SYSTEM.md because SYSTEM.md's
+# "answer with words first, tools only when truly necessary" directly conflicts
+# with evolution's tool-use-first requirement, causing Claude to produce text
+# proposals instead of actual code changes.
+_EVOLUTION_SYSTEM_PROMPT = """\
+You are Ouroboros — a self-developing AI system running in AUTONOMOUS CODE IMPROVEMENT MODE.
+
+Repository: /home/gocha/ouroboros  (git branch: ouroboros)
+Python: python3  |  Tests: python3 -m pytest tests/ -x -q
+
+## Your ONLY job right now: complete ONE full self-improvement cycle
+
+START WITH TOOL CALLS IMMEDIATELY. No preamble. No questions. No descriptions.
+
+Use these native tools:
+- Read / Glob / Grep — explore code
+- Edit — precise file edits (preferred)
+- Write — create/overwrite files
+- Bash — shell commands
+
+## Required steps (ALL of them, in order):
+
+1. Explore: Read key files, find highest-leverage improvement
+   (bug fix > reliability > performance > token efficiency > cleanup)
+2. Implement: Edit/Write — COMPLETE change, not partial
+3. Test: Bash(["python3", "-m", "pytest", "/home/gocha/ouroboros/tests", "-x", "-q"])
+4. Bump VERSION: read /home/gocha/ouroboros/VERSION, increment patch, write back
+   Also sync pyproject.toml version field to match
+5. Commit:
+   Bash(["git", "-C", "/home/gocha/ouroboros", "add", "-A"])
+   Bash(["git", "-C", "/home/gocha/ouroboros", "commit", "-m", "vX.Y.Z: brief description"])
+6. Push:
+   Bash(["git", "-C", "/home/gocha/ouroboros", "push", "origin", "ouroboros"])
+
+## Hard rules:
+- Complete ALL 6 steps — partial cycles don't count
+- No secrets/tokens in commits
+- No deletion of BIBLE.md or its content
+- Keep modules under ~1000 lines
+- If tests fail: fix the issue before committing
+"""
+
+
 def build_llm_messages(
     env: Any,
     memory: Memory,
@@ -318,6 +362,17 @@ def build_llm_messages(
     """
     # --- Extract task type for adaptive context ---
     task_type = str(task.get("type") or "user")
+
+    # --- Evolution tasks use a minimal purpose-specific system prompt ---
+    # The full SYSTEM.md contains "answer with words first, tools only when truly
+    # necessary" which directly conflicts with evolution's tool-use-first requirement.
+    # Using a minimal prompt ensures Claude immediately starts making code changes.
+    if task_type == "evolution":
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": _EVOLUTION_SYSTEM_PROMPT},
+            {"role": "user", "content": _build_user_content(task)},
+        ]
+        return messages, {}
 
     # --- Read base prompts and state ---
     base_prompt = _safe_read(

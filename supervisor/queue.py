@@ -347,27 +347,8 @@ def enforce_task_timeouts() -> None:
 # ---------------------------------------------------------------------------
 
 def build_evolution_task_text(cycle: int) -> str:
-    """Build evolution task text with native-tool instructions for claude -p mode."""
-    return (
-        f"EVOLUTION #{cycle}\n\n"
-        "⚠️ TOOL OVERRIDE: You are running via claude-proxy (claude -p mode). "
-        "The `claude_code_edit` Ouroboros tool does NOT exist here — ignore that instruction in the system prompt.\n\n"
-        "Use NATIVE Claude Code tools directly:\n"
-        "• Read / Glob / Grep — explore the codebase\n"
-        "• Edit — precise file edits (preferred for code changes)\n"
-        "• Write — create or overwrite files\n"
-        "• Bash — run shell commands (git, python, tests)\n\n"
-        "Repository path: /home/gocha/ouroboros  (git branch: ouroboros)\n\n"
-        "Complete the FULL cycle end-to-end:\n"
-        "1. Read code files → identify highest-leverage improvement\n"
-        "2. Implement with Edit/Write — complete, not partial\n"
-        "3. Test: Bash([\"python3\", \"-c\", \"import sys; sys.path.insert(0, '/home/gocha/ouroboros'); import ouroboros\"])\n"
-        "4. Commit:\n"
-        "   Bash([\"git\", \"-C\", \"/home/gocha/ouroboros\", \"add\", \"-A\"])\n"
-        "   Bash([\"git\", \"-C\", \"/home/gocha/ouroboros\", \"commit\", \"-m\", \"vX.Y.Z: description\"])\n"
-        "5. Push: Bash([\"git\", \"-C\", \"/home/gocha/ouroboros\", \"push\", \"origin\", \"ouroboros\"])\n\n"
-        "Do NOT describe changes — IMPLEMENT them end-to-end using the tools above."
-    )
+    """Build evolution task trigger text. System prompt carries the full instructions."""
+    return f"EVOLUTION #{cycle}: Begin self-improvement cycle. Explore, implement, test, commit, push."
 
 
 def build_review_task_text(reason: str) -> str:
