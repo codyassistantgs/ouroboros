@@ -331,3 +331,55 @@ def get_budget_remaining(state_data: Dict[str, Any]) -> Optional[float]:
     if or_remaining is not None:
         return float(or_remaining)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Rate limit helpers
+# ---------------------------------------------------------------------------
+
+def extract_retry_after(exc: Exception) -> Optional[float]:
+    """Extract Retry-After delay (seconds) from a rate-limit exception.
+
+    Checks (in order):
+    1. .response.headers["retry-after"] (openai SDK httpx response)
+    2. Regex patterns in repr(exc) for common Retry-After formats
+    Returns None if no delay hint found (caller should use default backoff).
+    """
+    import re as _re
+
+    response = getattr(exc, "response", None)
+    if response is not None:
+        headers = getattr(response, "headers", {}) or {}
+        raw = (headers.get("retry-after")
+               or headers.get("Retry-After")
+               or headers.get("x-ratelimit-reset-requests"))
+        if raw:
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                pass
+
+    error_str = repr(exc)
+    for pattern in (
+        r"retry.?after['\s:]+(\d+(?:\.\d+)?)",
+        r"reset.?in['\s:]+(\d+(?:\.\d+)?)\s*s",
+        r"x-ratelimit-reset-requests['\s:]+(\d+(?:\.\d+)?)",
+    ):
+        m = _re.search(pattern, error_str, _re.IGNORECASE)
+        if m:
+            try:
+                return float(m.group(1))
+            except (ValueError, TypeError):
+                pass
+    return None
+
+
+def is_rate_limit_error(exc: Exception) -> bool:
+    """Return True if the exception looks like an HTTP 429 rate-limit error."""
+    error_str = repr(exc)
+    return (
+        "429" in error_str
+        or "RateLimitError" in type(exc).__name__
+        or "rate limit" in error_str.lower()
+        or "too many requests" in error_str.lower()
+    )

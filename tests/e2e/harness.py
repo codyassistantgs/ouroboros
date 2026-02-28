@@ -75,6 +75,15 @@ class E2EHarness:
 
         # Init as git repo
         subprocess.run(["git", "init"], cwd=str(self.repo_dir), capture_output=True, check=True)
+        # Configure git identity so commits work in environments without global git config
+        subprocess.run(
+            ["git", "config", "user.name", "Ouroboros E2E"],
+            cwd=str(self.repo_dir), capture_output=True, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "e2e@ouroboros.local"],
+            cwd=str(self.repo_dir), capture_output=True, check=True,
+        )
         subprocess.run(["git", "add", "-A"], cwd=str(self.repo_dir), capture_output=True, check=True)
         subprocess.run(
             ["git", "commit", "-m", "initial"],

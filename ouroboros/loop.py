@@ -19,165 +19,20 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
+from ouroboros.pricing import get_pricing as _get_pricing, PROXY_MODEL_ALIASES as _PROXY_MODEL_ALIASES, estimate_cost as _estimate_cost_fn
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
+from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens, extract_retry_after, is_rate_limit_error
 
 log = logging.getLogger(__name__)
 
-# Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
-_MODEL_PRICING_STATIC = {
-    "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
-    "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
-    "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
-    "anthropic/claude-sonnet-4.6": (3.0, 0.30, 15.0),
-    "anthropic/claude-sonnet-4.5": (3.0, 0.30, 15.0),
-    "openai/o3": (2.0, 0.50, 8.0),
-    "openai/o3-pro": (20.0, 1.0, 80.0),
-    "openai/o4-mini": (1.10, 0.275, 4.40),
-    "openai/gpt-4.1": (2.0, 0.50, 8.0),
-    "openai/gpt-5.2": (1.75, 0.175, 14.0),
-    "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
-    "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
-    "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
-    "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
-    "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
-}
-
-_pricing_fetched = False
-_cached_pricing = None
-_pricing_lock = threading.Lock()
-
-def _get_pricing() -> Dict[str, Tuple[float, float, float]]:
-    """
-    Lazy-load pricing. On first call, attempts to fetch from OpenRouter API.
-    Falls back to static pricing if fetch fails.
-    Thread-safe via module-level lock.
-    """
-    global _pricing_fetched, _cached_pricing
-
-    # Fast path: already fetched (read without lock for performance)
-    if _pricing_fetched:
-        return _cached_pricing or _MODEL_PRICING_STATIC
-
-    # Slow path: fetch pricing (lock required)
-    with _pricing_lock:
-        # Double-check after acquiring lock (another thread may have fetched)
-        if _pricing_fetched:
-            return _cached_pricing or _MODEL_PRICING_STATIC
-
-        _pricing_fetched = True
-        _cached_pricing = dict(_MODEL_PRICING_STATIC)
-
-        try:
-            from ouroboros.llm import fetch_openrouter_pricing
-            _live = fetch_openrouter_pricing()
-            if _live and len(_live) > 5:
-                _cached_pricing.update(_live)
-        except Exception as e:
-            import logging as _log
-            _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
-            # Reset flag so we retry next time
-            _pricing_fetched = False
-
-        return _cached_pricing
-
-# Map short proxy model names → canonical OpenRouter model IDs for pricing lookup.
-# The proxy returns short names (e.g. "claude-sonnet-4-6") but pricing table uses
-# full IDs (e.g. "anthropic/claude-sonnet-4.6"). Add aliases here when proxy adds models.
-_PROXY_MODEL_ALIASES: Dict[str, str] = {
-    "claude-sonnet-4-6": "anthropic/claude-sonnet-4.6",
-    "claude-sonnet-4.6": "anthropic/claude-sonnet-4.6",
-    "claude-opus-4-6": "anthropic/claude-opus-4.6",
-    "claude-opus-4.6": "anthropic/claude-opus-4.6",
-    "claude-haiku-4-5-20251001": "anthropic/claude-haiku-4-5-20251001",
-    "gemini-2.5-pro": "google/gemini-2.5-pro-preview",
-    "gemini-2.5-flash": "google/gemini-2.5-flash-preview",
-    "gemini-3-pro-preview": "google/gemini-3-pro-preview",
-}
+# Pricing helpers live in ouroboros.pricing — imported above as _get_pricing, _PROXY_MODEL_ALIASES, _estimate_cost_fn.
 
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
                    cached_tokens: int = 0, cache_write_tokens: int = 0) -> float:
-    """Estimate cost from token counts using known pricing. Returns 0 if model unknown."""
-    model_pricing = _get_pricing()
-    # Normalize short proxy model names to canonical IDs
-    normalized = _PROXY_MODEL_ALIASES.get(model, model)
-    # Try exact match first
-    pricing = model_pricing.get(normalized)
-    if not pricing and normalized != model:
-        pricing = model_pricing.get(model)
-    if not pricing:
-        # Try longest prefix match (handles versioned model IDs)
-        best_match = None
-        best_length = 0
-        for key, val in model_pricing.items():
-            if normalized and normalized.startswith(key):
-                if len(key) > best_length:
-                    best_match = val
-                    best_length = len(key)
-        pricing = best_match
-    if not pricing:
-        return 0.0
-    input_price, cached_price, output_price = pricing
-    # Non-cached input tokens = prompt_tokens - cached_tokens
-    regular_input = max(0, prompt_tokens - cached_tokens)
-    cost = (
-        regular_input * input_price / 1_000_000
-        + cached_tokens * cached_price / 1_000_000
-        + completion_tokens * output_price / 1_000_000
-    )
-    return round(cost, 6)
-
-def _extract_retry_after(exc: Exception) -> Optional[float]:
-    """Extract Retry-After delay (in seconds) from an API rate-limit exception.
-
-    Handles three cases:
-    1. Exception has a .response attribute with Retry-After header (openai SDK)
-    2. Exception message contains "retry after N" or "Retry-After: N"
-    3. Returns None if no information is available (caller uses default backoff)
-    """
-    import re as _re
-
-    # Case 1: openai SDK exceptions carry the raw httpx response
-    response = getattr(exc, "response", None)
-    if response is not None:
-        headers = getattr(response, "headers", {}) or {}
-        raw = headers.get("retry-after") or headers.get("Retry-After") or headers.get("x-ratelimit-reset-requests")
-        if raw:
-            try:
-                return float(raw)
-            except (ValueError, TypeError):
-                pass
-
-    # Case 2: extract from the exception string
-    error_str = repr(exc)
-    patterns = [
-        r"retry.?after['\s:]+(\d+(?:\.\d+)?)",
-        r"reset.?in['\s:]+(\d+(?:\.\d+)?)\s*s",
-        r"x-ratelimit-reset-requests['\s:]+(\d+(?:\.\d+)?)",
-    ]
-    for pattern in patterns:
-        m = _re.search(pattern, error_str, _re.IGNORECASE)
-        if m:
-            try:
-                return float(m.group(1))
-            except (ValueError, TypeError):
-                pass
-
-    return None
-
-
-def _is_rate_limit_error(exc: Exception) -> bool:
-    """Return True if the exception looks like an HTTP 429 rate-limit error."""
-    error_str = repr(exc)
-    return (
-        "429" in error_str
-        or "RateLimitError" in type(exc).__name__
-        or "rate limit" in error_str.lower()
-        or "too many requests" in error_str.lower()
-    )
-
+    """Thin wrapper — delegates to ouroboros.pricing.estimate_cost."""
+    return _estimate_cost_fn(model, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens)
 
 READ_ONLY_PARALLEL_TOOLS = frozenset({
     "repo_read", "repo_list",
@@ -979,37 +834,24 @@ def _call_llm_with_retry(
 
         except Exception as e:
             last_error = e
-            is_rate_limit = _is_rate_limit_error(e)
-
-            # Determine sleep duration before next retry
-            if is_rate_limit:
-                # Respect Retry-After header if present; otherwise exponential backoff
-                # capped at 3600s (rate limits can reset daily, IMPROVE.md lesson #4)
-                retry_after = _extract_retry_after(e)
-                if retry_after is not None:
-                    sleep_sec = min(float(retry_after) + 1.0, 3600.0)
-                else:
-                    # Exponential backoff: 30s, 120s, 480s ... capped at 3600s
-                    sleep_sec = min(30 * (4 ** attempt), 3600.0)
+            rl = is_rate_limit_error(e)
+            # Rate limits: respect Retry-After header, else exp backoff up to 3600s
+            # Non-rate-limit: fast backoff (2s, 4s) — IMPROVE.md lesson #4
+            if rl:
+                ra = extract_retry_after(e)
+                sleep_sec = min(float(ra) + 1.0, 3600.0) if ra is not None else min(30 * (4 ** attempt), 3600.0)
             else:
-                # Non-rate-limit error: fast backoff (2s, 4s)
                 sleep_sec = min(2 ** attempt * 2, 30)
-
             append_jsonl(drive_logs / "events.jsonl", {
                 "ts": utc_now_iso(), "type": "llm_api_error",
-                "task_id": task_id,
-                "round": round_idx, "attempt": attempt + 1,
+                "task_id": task_id, "round": round_idx, "attempt": attempt + 1,
                 "model": model, "error": repr(e),
-                "is_rate_limit": is_rate_limit,
+                "is_rate_limit": rl,
                 "sleep_sec": sleep_sec if attempt < max_retries - 1 else 0,
             })
-
             if attempt < max_retries - 1:
-                if is_rate_limit:
-                    log.warning(
-                        "Rate limit hit (attempt %d/%d), sleeping %.0fs before retry",
-                        attempt + 1, max_retries, sleep_sec,
-                    )
+                if rl:
+                    log.warning("Rate limit (attempt %d/%d), sleeping %.0fs", attempt + 1, max_retries, sleep_sec)
                 time.sleep(sleep_sec)
 
     return None, 0.0

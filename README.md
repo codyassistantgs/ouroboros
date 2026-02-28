@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.2 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.5 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,10 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.5 -- Fix e2e harness: git identity for isolated test repos
+- **Fix:** E2E test harness  now configures  and  in the isolated temp repo before the initial commit, so tests pass in CI environments with no global git config.
+- **Fix:** README version badge kept in sync with VERSION file — test  now passes reliably.
 
 ### v7.1.3 -- Fix budget tracking: proxy cost now reaches spent_usd
 - **Fix:** `_handle_llm_usage` in events.py was passing raw API usage dict (cost=0 from proxy) to `update_budget_from_usage`, ignoring the estimated cost computed in loop.py. `spent_usd` was stuck at $0.0 despite 144+ calls and 15M+ tokens.
