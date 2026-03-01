@@ -308,12 +308,20 @@ def _build_health_invariants(env: Any) -> str:
     return "## Health Invariants\n\n" + "\n".join(f"- {c}" for c in checks)
 
 
-def _find_specific_evolution_target(env: Any, repo_dir: str) -> str:
-    """Scan recent event logs to find a specific improvement target for evolution.
 
-    Returns a short description of the most actionable issue found, or an empty
-    string if nothing specific is found.  The caller should fall back to a
-    priority list from IMPROVE.md when this returns "".
+# Event types that are external/infra errors, not fixable code bugs.
+_EVOLUTION_SKIP_EVENT_TYPES = frozenset({"consciousness_rate_limit", "llm_empty_response"})
+# Keywords in error detail that indicate a transient rate-limit, not a code bug.
+_RATE_LIMIT_KEYWORDS = ("ratelimit", "rate limit", "429", "hit your limit",
+                        "too many requests", "quota exceeded")
+
+
+def _find_specific_evolution_target(env: Any, repo_dir: str) -> str:
+    """Scan recent events for an actionable improvement target for evolution.
+
+    Returns a short description of the most actionable issue found, or "" to
+    fall back to IMPROVE.md.  Rate-limit/infra errors are excluded — they are
+    external API constraints, not code bugs.
     """
     # 1. Scan last 100 lines of events.jsonl for tool_error / failed events
     events_path = env.drive_path("logs/events.jsonl")
@@ -332,20 +340,27 @@ def _find_specific_evolution_target(env: Any, repo_dir: str) -> str:
                 try:
                     ev = json.loads(line)
                     ev_type = str(ev.get("type") or ev.get("event_type") or "")
-                    if "error" in ev_type.lower() or "fail" in ev_type.lower():
-                        detail = (
-                            ev.get("error") or ev.get("message") or
-                            ev.get("result") or ev.get("text") or ""
-                        )
-                        if detail and len(str(detail)) > 5:
-                            errors.append(f"{ev_type}: {str(detail)[:200]}")
+                    if "error" not in ev_type.lower() and "fail" not in ev_type.lower():
+                        continue
+                    if ev_type in _EVOLUTION_SKIP_EVENT_TYPES:
+                        continue
+                    if ev.get("is_rate_limit") or ev.get("daily_limit"):
+                        continue
+                    detail = (
+                        ev.get("error") or ev.get("message") or
+                        ev.get("result") or ev.get("text") or ""
+                    )
+                    if not detail or len(str(detail)) <= 5:
+                        continue
+                    if any(kw in str(detail).lower() for kw in _RATE_LIMIT_KEYWORDS):
+                        continue
+                    errors.append(f"{ev_type}: {str(detail)[:200]}")
                 except (json.JSONDecodeError, Exception):
                     continue
     except Exception:
         pass
 
     if errors:
-        # Return the most recent distinct error as the target
         return f"Fix recent error — {errors[-1]}"
 
     # 2. No errors found — pick from IMPROVE.md priority list
