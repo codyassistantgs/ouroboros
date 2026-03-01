@@ -156,3 +156,93 @@ class TestCheckRateLimitWindow:
         assert result is not None
         assert result > 21000, f"Expected ~21300s remaining, got {result:.0f}s"
         assert result < 21600
+
+    def test_consciousness_rate_limit_event_active(self):
+        """consciousness_rate_limit with retry_after_sec > 1800 → detected as active window."""
+        from supervisor.queue import _check_rate_limit_window
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            # Simulate consciousness hitting a daily rate limit 2 minutes ago
+            _write_events(tmp_path, [
+                {
+                    "ts": _ts_offset(-120),   # 2 minutes ago
+                    "type": "consciousness_rate_limit",
+                    "retry_after_sec": 28800,  # 8h reset → still ~7h58m remaining
+                    "error": "RateLimitError('429 - rate limit')",
+                    "next_wakeup_sec": 28860,
+                },
+            ])
+            result = _check_rate_limit_window(tmp_path)
+        assert result is not None, "consciousness_rate_limit with large retry_after_sec should be detected"
+        assert result > 0, "Remaining seconds should be positive"
+        # Should be approximately 28800 - 120 = 28680 seconds remaining
+        assert 28000 < result < 28800, f"Expected ~28680s remaining, got {result:.0f}s"
+
+    def test_consciousness_rate_limit_event_short_not_detected(self):
+        """consciousness_rate_limit with retry_after_sec <= 1800 → NOT treated as daily limit."""
+        from supervisor.queue import _check_rate_limit_window
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            # Short transient rate limit (< 30 min) — should not block evolution
+            _write_events(tmp_path, [
+                {
+                    "ts": _ts_offset(-30),
+                    "type": "consciousness_rate_limit",
+                    "retry_after_sec": 60,   # only 60s reset — transient, not daily
+                    "error": "RateLimitError('429 - too many requests')",
+                },
+            ])
+            result = _check_rate_limit_window(tmp_path)
+        assert result is None, "Short consciousness rate limit should NOT block evolution"
+
+    def test_consciousness_rate_limit_event_expired(self):
+        """consciousness_rate_limit event whose window has already passed → returns None."""
+        from supervisor.queue import _check_rate_limit_window
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            # Event happened 10 hours ago, reset was in 8 hours → already reset
+            _write_events(tmp_path, [
+                {
+                    "ts": _ts_offset(-36000),  # 10 hours ago
+                    "type": "consciousness_rate_limit",
+                    "retry_after_sec": 28800,   # 8h from event = 2h ago → expired
+                },
+            ])
+            result = _check_rate_limit_window(tmp_path)
+        assert result is None, "Expired consciousness_rate_limit should return None"
+
+
+class TestExtractRetryAfter:
+    """Unit tests for extract_retry_after() in ouroboros/utils.py."""
+
+    def test_you_ve_hit_your_limit_returns_8h(self):
+        """'You've hit your limit' phrase → returns 28800s (8h fallback)."""
+        from ouroboros.utils import extract_retry_after
+        exc = Exception("RateLimitError('Error code: 429 - {\"detail\": \"Rate limit: You\\'ve hit your limit \\u00b7 resets 8pm (UTC)\"}')")
+        result = extract_retry_after(exc)
+        # The specific "resets 8pm (UTC)" pattern should be caught by the wall-clock
+        # parser first; if parsing fails for any reason, the "hit your limit" fallback
+        # should return 28800. Either way, result must be a positive number > 1800.
+        assert result is not None, "Should return a positive delay, not None"
+        assert result > 1800, f"Daily limit should return >1800s, got {result}"
+
+    def test_hit_your_limit_no_time_returns_8h(self):
+        """'You've hit your limit' without a reset time → exactly 28800s fallback."""
+        from ouroboros.utils import extract_retry_after
+        exc = Exception("RateLimitError('Error code: 429 - {\"detail\": \"Rate limit: You\\'ve hit your limit\"}')")
+        result = extract_retry_after(exc)
+        assert result == 28800.0, f"Expected 28800s fallback, got {result}"
+
+    def test_you_have_hit_your_limit_returns_8h(self):
+        """'You have hit your limit' variant → returns 28800s fallback."""
+        from ouroboros.utils import extract_retry_after
+        exc = Exception("RateLimitError('429: You have hit your limit for today')")
+        result = extract_retry_after(exc)
+        assert result == 28800.0, f"Expected 28800s fallback, got {result}"
+
+    def test_regular_rate_limit_no_limit_phrase_returns_none(self):
+        """Generic rate limit without 'hit your limit' → returns None (no fallback)."""
+        from ouroboros.utils import extract_retry_after
+        exc = Exception("RateLimitError('Error code: 429 - {\"detail\": \"Too many requests\"}')")
+        result = extract_retry_after(exc)
+        assert result is None, f"Generic 429 without time/phrase should return None, got {result}"

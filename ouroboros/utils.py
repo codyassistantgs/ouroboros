@@ -405,6 +405,19 @@ def extract_retry_after(exc: Exception) -> Optional[float]:
         except (ValueError, TypeError):
             pass
 
+    # Final fallback: "hit your limit" or "you have hit your limit".
+    # These phrases appear in OpenRouter/Anthropic daily rate limit errors when a
+    # specific reset time is absent or the above patterns failed to match (e.g.
+    # the error was deeply nested in quotes/repr, causing apostrophe escaping in
+    # "you've hit your limit").  The phrase "hit your limit" is unambiguous and
+    # survives all levels of Python repr escaping.
+    # Return 8 hours as a conservative default so the system backs off even when
+    # the exact reset time cannot be extracted — better than returning None and
+    # treating it as a transient error that should be retried in seconds.
+    error_lower = error_str.lower()
+    if "hit your limit" in error_lower or "you have hit your limit" in error_lower:
+        return 28800.0  # 8 hours
+
     return None
 
 

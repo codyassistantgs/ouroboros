@@ -412,14 +412,30 @@ def _check_rate_limit_window(drive_root: pathlib.Path) -> Optional[float]:
                 continue
             try:
                 ev = json.loads(line)
-                if ev.get("type") != "llm_api_error":
+                ev_type = ev.get("type")
+                resets_in_sec: Optional[float] = None
+
+                if ev_type == "llm_api_error":
+                    # Evolution/agent tasks log daily rate limits here
+                    if not ev.get("daily_limit"):
+                        continue
+                    resets_in_sec = float(ev.get("resets_in_sec") or 0)
+                elif ev_type == "consciousness_rate_limit":
+                    # Background consciousness logs rate limits separately.
+                    # Treat as a daily limit window if retry_after_sec > 30 min,
+                    # since short transient limits don't need to block evolution.
+                    ra = float(ev.get("retry_after_sec") or 0)
+                    if ra <= 1800:
+                        continue
+                    resets_in_sec = ra
+                else:
                     continue
-                if not ev.get("daily_limit"):
-                    continue
+
                 # Found a daily-rate-limit event — compute reset epoch
+                if not resets_in_sec or resets_in_sec <= 0:
+                    continue
                 ev_ts_str = str(ev.get("ts") or "")
-                resets_in_sec = float(ev.get("resets_in_sec") or 0)
-                if not ev_ts_str or resets_in_sec <= 0:
+                if not ev_ts_str:
                     continue
                 ev_ts = datetime.datetime.fromisoformat(
                     ev_ts_str.replace("Z", "+00:00")
