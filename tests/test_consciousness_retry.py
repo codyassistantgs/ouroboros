@@ -193,3 +193,86 @@ class TestThinkRetryOnGoogleError:
             assert len(error_events) >= 1, (
                 "consciousness_llm_error should be logged when retry also fails"
             )
+
+
+# ---------------------------------------------------------------------------
+# Rate limit backoff tests
+# ---------------------------------------------------------------------------
+
+class TestRateLimitBackoff:
+    """consciousness._think() handles rate limits with correct backoff and event type."""
+
+    def test_rate_limit_logs_distinct_event_type(self):
+        """When a 429 rate limit is hit, consciousness_rate_limit event is logged
+        (NOT consciousness_llm_error), so monitoring can distinguish them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            bc = _make_consciousness(tmp_path)
+
+            # Simulate a 429 rate limit error with a wall-clock reset time
+            rate_limit_err = Exception(
+                "RateLimitError(\"Error code: 429 - {'detail': \\\"Rate limit: "
+                "You've hit your limit \\u00b7 resets 8pm (UTC)\\\"}\")"
+            )
+            bc._llm.chat = MagicMock(side_effect=rate_limit_err)
+            bc._build_context = MagicMock(return_value="context")
+            bc._tool_schemas = MagicMock(return_value=[])
+            bc._maybe_schedule_arch_review = MagicMock()
+
+            # Store original wakeup interval
+            original_wakeup = bc._next_wakeup_sec
+
+            bc._think()
+
+            import json
+            events_path = tmp_path / "logs" / "events.jsonl"
+            events = []
+            if events_path.exists():
+                events = [
+                    json.loads(line)
+                    for line in events_path.read_text().splitlines()
+                    if line.strip()
+                ]
+
+            # Must log consciousness_rate_limit, not consciousness_llm_error
+            rl_events = [e for e in events if e.get("type") == "consciousness_rate_limit"]
+            error_events = [e for e in events if e.get("type") == "consciousness_llm_error"]
+            assert len(rl_events) >= 1, (
+                "consciousness_rate_limit event should be logged on 429 error"
+            )
+            assert len(error_events) == 0, (
+                f"consciousness_llm_error should NOT be logged for rate limits, got: {error_events}"
+            )
+
+    def test_rate_limit_backoff_cap_is_24h(self):
+        """Daily rate limit (ra > 14400s) sleeps up to 24h, not just 4h.
+
+        Previous cap was 14400s (4h), which caused the consciousness to retry
+        4+ times before the reset, logging a spurious error each time.
+        The new cap is 86400s (24h) so it waits out the full daily reset.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            bc = _make_consciousness(tmp_path)
+
+            # Simulate a 429 where extract_retry_after would return ~57600s (16h from now)
+            # We mock extract_retry_after directly to avoid time-zone arithmetic in tests.
+            rate_limit_err = Exception("RateLimitError('429 - rate limit')")
+            bc._llm.chat = MagicMock(side_effect=rate_limit_err)
+            bc._build_context = MagicMock(return_value="context")
+            bc._tool_schemas = MagicMock(return_value=[])
+            bc._maybe_schedule_arch_review = MagicMock()
+
+            # Patch extract_retry_after to return 57600 (16 hours) to simulate a
+            # daily reset that's far in the future without depending on wall-clock time.
+            with patch("ouroboros.utils.extract_retry_after", return_value=57600.0):
+                bc._think()
+
+            # next_wakeup_sec should be 57600 + 60 = 57660 (< 86400 cap)
+            # NOT the old cap of 14400
+            assert bc._next_wakeup_sec > 14400, (
+                f"With a 16h reset, wakeup should be >14400s, got {bc._next_wakeup_sec}"
+            )
+            assert bc._next_wakeup_sec <= 86400, (
+                f"Wakeup should not exceed 86400s cap, got {bc._next_wakeup_sec}"
+            )

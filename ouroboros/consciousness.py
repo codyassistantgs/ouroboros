@@ -437,11 +437,23 @@ class BackgroundConsciousness:
                 from ouroboros.utils import extract_retry_after as _extract_ra
                 _ra = _extract_ra(e)
                 if _ra is not None and _ra > 0:
-                    # Sleep until actual reset time + 60s buffer, capped at 4 hours
-                    self._next_wakeup_sec = min(float(_ra) + 60.0, 14400.0)
+                    # Sleep until actual reset time + 60s buffer.
+                    # Cap at 86400s (24h) — handles daily limits that reset 8-16h away
+                    # without waking up 4+ times and hitting the limit again each time.
+                    self._next_wakeup_sec = min(float(_ra) + 60.0, 86400.0)
                     log.info("consciousness: rate limit, sleeping %.0fs until reset", self._next_wakeup_sec)
                 else:
                     self._next_wakeup_sec = min(self._next_wakeup_sec * 3, 3600)
+                # Log rate limits under a distinct event type so they're easy to
+                # distinguish from real logic errors in monitoring/dashboards.
+                append_jsonl(self._drive_root / "logs" / "events.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "consciousness_rate_limit",
+                    "error": error_str,
+                    "next_wakeup_sec": self._next_wakeup_sec,
+                    "retry_after_sec": _ra,
+                })
+                return  # Don't fall through to consciousness_llm_error below
             # Google model unavailable (GOOGLE_API_KEY not configured in proxy/env):
             # Switch to a guaranteed non-Google model permanently for this session so the
             # consciousness loop continues working without constant 500 errors.
