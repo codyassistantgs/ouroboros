@@ -222,6 +222,10 @@ Full text: [BIBLE.md](BIBLE.md)
 
 ## Changelog
 
+### v7.1.13 -- Fix critical deploy gap: code volume mount in docker-compose
+
+- **Fix (critical):** Container was running baked-in code from v7.1.4 while git repo had evolved to v7.1.12. All evolution fixes (circuit breaker, model routing, context improvements) were committed but never deployed. Root cause: Dockerfile uses `COPY . .` and evolution's `git push` goes to the host repo via claude-proxy, but the container was never rebuilt. Added `- /home/gocha/ouroboros:/app` live volume mount to docker-compose.yml so the container always runs the latest committed code after restart. One-time manual `docker compose up -d --build` required to activate.
+
 ### v7.1.12 -- Fix estimate_cost: cache_write_tokens now included in cost calculation
 
 - **Fix:** `estimate_cost` in `pricing.py` accepted `cache_write_tokens` as a parameter but silently ignored it, underestimating costs whenever Anthropic prompt cache writes occurred. Cache-write tokens now correctly contribute `input_price × 1.25` per token (Anthropic standard), and `regular_input` is computed as `prompt_tokens − cached_tokens − cache_write_tokens` to avoid double-counting.

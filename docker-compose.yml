@@ -9,5 +9,6 @@ services:
     volumes:
       - ouroboros-data:/data
       - /home/gocha/.claude:/home/ouroboros/.claude
+      - /home/gocha/ouroboros:/app  # live code mount: container always runs latest git code
 volumes:
   ouroboros-data:
