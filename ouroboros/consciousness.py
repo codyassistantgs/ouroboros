@@ -36,6 +36,15 @@ from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
 log = logging.getLogger(__name__)
 
 
+def _is_google_model(model: str) -> bool:
+    """Return True if model name refers to a Google/Gemini model.
+
+    Handles both "google/<model>" and bare "gemini-*" naming conventions,
+    matching the same logic used by the proxy's get_backend() function.
+    """
+    return model.startswith("google/") or model.startswith("gemini")
+
+
 class BackgroundConsciousness:
     """Persistent background thinking loop for Ouroboros."""
 
@@ -74,8 +83,9 @@ class BackgroundConsciousness:
 
         # Proactive startup check: if the configured light model is a Google model but
         # GOOGLE_API_KEY is not set, pre-set the override NOW to avoid the first-call 500 error.
+        # Checks both "google/*" and bare "gemini-*" model name forms.
         _light_model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
-        if _light_model.startswith("google/") and not os.environ.get("GOOGLE_API_KEY"):
+        if _is_google_model(_light_model) and not os.environ.get("GOOGLE_API_KEY"):
             _fallback = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-haiku-4-5")
             self._model_override = _fallback
             log.info(
@@ -96,7 +106,19 @@ class BackgroundConsciousness:
     def _model(self) -> str:
         if self._model_override:
             return self._model_override
-        return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        # Dynamic guard: if this is a Google model but GOOGLE_API_KEY is absent,
+        # permanently switch to the main model so we never send a doomed request.
+        if _is_google_model(model) and not os.environ.get("GOOGLE_API_KEY"):
+            fallback = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-haiku-4-5")
+            self._model_override = fallback
+            log.warning(
+                "consciousness: Google model %r requires GOOGLE_API_KEY (not set); "
+                "switching to fallback %s",
+                model, fallback,
+            )
+            return fallback
+        return model
 
     def start(self) -> str:
         if self.is_running:
@@ -309,14 +331,17 @@ class BackgroundConsciousness:
             # Google model unavailable (GOOGLE_API_KEY not configured in proxy/env):
             # Switch to main Anthropic model permanently for this session so the
             # consciousness loop continues working without constant 500 errors.
-            elif "GOOGLE_API_KEY" in error_str and not self._model_override:
+            # Note: no "not self._model_override" guard — if the override itself is
+            # a Google model, we must still recover here.
+            elif "GOOGLE_API_KEY" in error_str:
                 fallback = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-haiku-4-5")
-                self._model_override = fallback
-                self._next_wakeup_sec = 60  # retry soon with new model
-                log.warning(
-                    "consciousness: Google model unavailable (GOOGLE_API_KEY not configured), "
-                    "switching to fallback model %s", fallback
-                )
+                if self._model_override != fallback:
+                    self._model_override = fallback
+                    self._next_wakeup_sec = 60  # retry soon with new model
+                    log.warning(
+                        "consciousness: Google model unavailable (GOOGLE_API_KEY not configured), "
+                        "switching to fallback model %s", fallback
+                    )
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "consciousness_llm_error",
