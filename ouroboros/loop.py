@@ -654,9 +654,12 @@ def run_llm_loop(
                     ), accumulated_usage, llm_trace
 
                 # Configurable fallback priority list (Bible P3: no hardcoded behavior)
+                # Default: use another Claude model so the local proxy can serve it without
+                # requiring GOOGLE_API_KEY or GROQ_API_KEY.  google/gemini-2.5-pro-preview
+                # was the old first choice but fails if GOOGLE_API_KEY is absent.
                 fallback_list_raw = os.environ.get(
                     "OUROBOROS_MODEL_FALLBACK_LIST",
-                    "google/gemini-2.5-pro-preview,openai/o3,anthropic/claude-sonnet-4.6"
+                    "claude-opus-4-6,anthropic/claude-sonnet-4.6,openai/o3"
                 )
                 fallback_candidates = [m.strip() for m in fallback_list_raw.split(",") if m.strip()]
                 fallback_model = None
