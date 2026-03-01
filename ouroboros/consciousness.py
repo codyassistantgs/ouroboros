@@ -69,6 +69,8 @@ class BackgroundConsciousness:
         self._bg_budget_pct: float = float(
             os.environ.get("OUROBOROS_BG_BUDGET_PCT", "10")
         )
+        # Model override: set when primary model is unavailable (e.g. GOOGLE_API_KEY missing)
+        self._model_override: Optional[str] = None
 
     # -------------------------------------------------------------------
     # Lifecycle
@@ -80,6 +82,8 @@ class BackgroundConsciousness:
 
     @property
     def _model(self) -> str:
+        if self._model_override:
+            return self._model_override
         return os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
 
     def start(self) -> str:
@@ -290,10 +294,22 @@ class BackgroundConsciousness:
             # Rate limit: back off exponentially instead of hammering the API
             if "429" in error_str or "RateLimit" in error_str or "rate limit" in error_str.lower():
                 self._next_wakeup_sec = min(self._next_wakeup_sec * 3, 3600)
+            # Google model unavailable (GOOGLE_API_KEY not configured in proxy/env):
+            # Switch to main Anthropic model permanently for this session so the
+            # consciousness loop continues working without constant 500 errors.
+            elif "GOOGLE_API_KEY" in error_str and not self._model_override:
+                fallback = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-haiku-4-5")
+                self._model_override = fallback
+                self._next_wakeup_sec = 60  # retry soon with new model
+                log.warning(
+                    "consciousness: Google model unavailable (GOOGLE_API_KEY not configured), "
+                    "switching to fallback model %s", fallback
+                )
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "consciousness_llm_error",
                 "error": error_str,
+                "model_override": self._model_override,
             })
 
     # -------------------------------------------------------------------

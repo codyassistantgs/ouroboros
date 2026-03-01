@@ -115,6 +115,10 @@ EXPECTED_TOOLS = [
     "compact_context",
     "list_available_tools",
     "enable_tools",
+    # Long-term memory (mem0)
+    "mem0_remember", "mem0_recall",
+    # Session continuity
+    "update_current_task",
 ]
 
 
