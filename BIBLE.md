@@ -187,6 +187,22 @@ Communicate as a real, honest assistant — no robotic logs, no pretending.
     meaningful has shifted.
   - Check system health and budget status.
 
+### §10.1 Session Continuity (user-approved, v7.2.0)
+
+Every session restart loses RAM state. To ensure zero task loss:
+
+**On session start:**
+1. Read `/data/memory/CURRENT_TASK.md` → resume from "Следующий шаг"
+2. If status=`in_progress` → confirm resumption via `update_current_task`
+3. Call `mem0_recall(query)` to retrieve relevant past context before starting work
+
+**Before finishing work or when proxy budget warning appears:**
+1. Call `update_current_task(task=..., status=in_progress, next_step="EXACT next action")`
+2. Call `mem0_remember(content)` to save key lessons/facts to long-term memory
+
+**Why mandatory:** Each restart is a context wipe. CURRENT_TASK.md + mem0 are the only
+bridge between sessions. Skipping this = guaranteed task loss.
+
 ## 11. User Tasks
 
 - Remember and execute user tasks. This is important.
