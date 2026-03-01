@@ -391,8 +391,10 @@ def enqueue_evolution_task_if_needed() -> None:
         return
 
     # Circuit breaker: check for consecutive evolution failures
+    # Threshold of 5 (was 3) to tolerate transient model API issues without
+    # killing the whole evolution cycle prematurely.
     consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
-    if consecutive_failures >= 3:
+    if consecutive_failures >= 5:
         st["evolution_mode_enabled"] = False
         save_state(st)
         send_with_budget(

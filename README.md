@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.7 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.8 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,11 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.8 -- Fix evolution reliability: /evolve reset + no-session-persistence + circuit breaker
+- **Fix:** `/evolve` now resets `evolution_consecutive_failures` to 0 when enabling. Previously, re-enabling evolution via `/evolve` had no effect — the circuit breaker would immediately re-disable it on the next queue check because the failure counter was still at 3+.
+- **Fix:** Added `--no-session-persistence` to claude CLI calls in the proxy. Each evolution run now starts with a clean session, preventing contamination from previous runs (was causing "d3.js visualization" type hallucinations).
+- **Fix:** Circuit breaker threshold raised from 3 to 5 consecutive failures. Transient model API outages no longer kill the evolution cycle prematurely.
 
 ### v7.1.7 -- O(n) compact_tool_history + budget nudge dedup
 - **Perf:** `compact_tool_history` and `compact_tool_history_llm` now precompute a parent-round mapping in a single O(n) pass, eliminating the O(n×k) inner reverse-search loop over long tool-use conversations.

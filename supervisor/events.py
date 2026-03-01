@@ -391,6 +391,11 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     enabled = bool(evt.get("enabled"))
     st = ctx.load_state()
     st["evolution_mode_enabled"] = enabled
+    # Reset circuit breaker when evolution is explicitly enabled by the user.
+    # Without this, consecutive_failures >= threshold immediately re-disables evolution
+    # on the very next enqueue_evolution_task_if_needed() call.
+    if enabled:
+        st["evolution_consecutive_failures"] = 0
     ctx.save_state(st)
     if not enabled:
         ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
