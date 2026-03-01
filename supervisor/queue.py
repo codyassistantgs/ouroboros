@@ -375,6 +375,61 @@ def queue_review_task(reason: str, force: bool = False) -> Optional[str]:
     return tid
 
 
+def _check_model_api_health(drive_root: pathlib.Path, lookback: int = 3) -> bool:
+    """Return True if evolution can proceed, False if model API appears unhealthy.
+
+    Scans the last ``lookback`` evolution task outcomes from supervisor.jsonl.
+    If all of them failed with "Failed to get a response" (proxy/CLI errors),
+    it means the model API is down and starting another evolution wastes budget.
+    """
+    sup_log = drive_root / "logs" / "supervisor.jsonl"
+    if not sup_log.exists():
+        return True  # No log — assume healthy
+    try:
+        import subprocess as _sp_hc
+        _tail = _sp_hc.run(
+            ["tail", "-n", "500", str(sup_log)],
+            capture_output=True, text=True, timeout=10,
+        )
+        lines = (_tail.stdout or "").splitlines()
+        api_fail_markers = [
+            "failed to get a response",
+            "failed to start claude cli",
+            "claude cli timeout",
+            "claude cli failed",
+        ]
+        recent_evo_results: list = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+                ev_type = str(ev.get("type") or ev.get("event_type") or "")
+                if ev_type not in ("task_completed", "task_failed", "task_hard_timeout"):
+                    continue
+                task = ev.get("task") or {}
+                if str(task.get("type") or ev.get("task_type") or "") != "evolution":
+                    continue
+                result_text = str(ev.get("result") or ev.get("error") or ev.get("message") or "").lower()
+                is_api_fail = any(m in result_text for m in api_fail_markers)
+                recent_evo_results.append(is_api_fail)
+            except (json.JSONDecodeError, Exception):
+                continue
+
+        if len(recent_evo_results) >= lookback:
+            last_n = recent_evo_results[-lookback:]
+            if all(last_n):
+                log.warning(
+                    "Evolution pre-flight: last %d evolution tasks all failed with model API errors — skipping",
+                    lookback,
+                )
+                return False
+    except Exception:
+        log.debug("Evolution pre-flight check failed", exc_info=True)
+    return True
+
+
 def enqueue_evolution_task_if_needed() -> None:
     """Enqueue evolution task if queue is empty and evolution mode is enabled.
 
@@ -401,6 +456,17 @@ def enqueue_evolution_task_if_needed() -> None:
             int(owner_chat_id),
             f"🧬⚠️ Evolution paused: {consecutive_failures} consecutive failures. "
             f"Use /evolve start to resume after investigating the issue."
+        )
+        return
+
+    # Fix C: Pre-flight model API health check
+    # If the last 3 evolutions all failed with model API errors, wait for recovery
+    # instead of burning budget on a guaranteed failure.
+    if not _check_model_api_health(DRIVE_ROOT, lookback=3):
+        send_with_budget(
+            int(owner_chat_id),
+            "🧬⏸️ Evolution skipped: last 3 evolutions failed with model API errors. "
+            "Will retry next cycle. Check proxy/Claude CLI health."
         )
         return
 

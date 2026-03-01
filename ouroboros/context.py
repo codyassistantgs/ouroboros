@@ -296,6 +296,64 @@ def _build_health_invariants(env: Any) -> str:
     return "## Health Invariants\n\n" + "\n".join(f"- {c}" for c in checks)
 
 
+def _find_specific_evolution_target(env: Any, repo_dir: str) -> str:
+    """Scan recent event logs to find a specific improvement target for evolution.
+
+    Returns a short description of the most actionable issue found, or an empty
+    string if nothing specific is found.  The caller should fall back to a
+    priority list from IMPROVE.md when this returns "".
+    """
+    # 1. Scan last 100 lines of events.jsonl for tool_error / failed events
+    events_path = env.drive_path("logs/events.jsonl")
+    errors: list = []
+    try:
+        if events_path.exists():
+            import subprocess as _sp_ev
+            _tail = _sp_ev.run(
+                ["tail", "-n", "100", str(events_path)],
+                capture_output=True, text=True, timeout=10,
+            )
+            for line in (_tail.stdout or "").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                    ev_type = str(ev.get("type") or ev.get("event_type") or "")
+                    if "error" in ev_type.lower() or "fail" in ev_type.lower():
+                        detail = (
+                            ev.get("error") or ev.get("message") or
+                            ev.get("result") or ev.get("text") or ""
+                        )
+                        if detail and len(str(detail)) > 5:
+                            errors.append(f"{ev_type}: {str(detail)[:200]}")
+                except (json.JSONDecodeError, Exception):
+                    continue
+    except Exception:
+        pass
+
+    if errors:
+        # Return the most recent distinct error as the target
+        return f"Fix recent error — {errors[-1]}"
+
+    # 2. No errors found — pick from IMPROVE.md priority list
+    try:
+        improve_path = pathlib.Path(repo_dir) / "IMPROVE.md"
+        if improve_path.exists():
+            improve_text = improve_path.read_text(encoding="utf-8")
+            # Extract first actionable checklist item that isn't already checked
+            for line in improve_text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("- [ ]"):
+                    item = stripped[5:].strip()
+                    if item:
+                        return f"Implement checklist item from IMPROVE.md: {item}"
+    except Exception:
+        pass
+
+    return ""
+
+
 # Minimal system prompt for evolution tasks.
 # Deliberately EXCLUDES the full conversational SYSTEM.md because SYSTEM.md's
 # "answer with words first, tools only when truly necessary" directly conflicts
@@ -394,14 +452,26 @@ def build_llm_messages(
         except Exception:
             pass
 
+        # Fix A: Scan recent events log for specific issues to target
+        specific_issue = _find_specific_evolution_target(env, repo_dir)
+        if specific_issue:
+            task_text_with_issue = f"{task_text} — Specific target: {specific_issue}"
+        else:
+            task_text_with_issue = task_text
+
         # Build the user message with the explicit goal at the top
         # The goal line is placed first so it is immediately visible to the model
         # even after any proxy transformation that might truncate or reformat.
+        # Fix B: Explicit NO CONVERSATION reinforcement
         goal_header = (
-            f"TASK: {task_text}\n\n"
-            f"Repository path: {repo_dir}\n"
-            f"Start immediately with Read/Grep/Glob tool calls to explore the code. "
-            f"Do NOT ask questions or describe what you plan to do — just do it."
+            f"TASK: {task_text_with_issue}\n\n"
+            f"Repository path: {repo_dir}\n\n"
+            f"WARNING — EXECUTION MODE ONLY:\n"
+            f"You are NOT in a conversation. Do NOT write explanatory text.\n"
+            f"Do NOT ask questions. Do NOT describe your plan.\n"
+            f"Your FIRST output MUST be a tool call (Read/Grep/Glob/Edit/Write/Bash).\n"
+            f"Any text response without a tool call is WRONG and wastes the cycle.\n\n"
+            f"START IMMEDIATELY with a Read/Glob/Grep tool call to explore the code."
         )
         if extra_ctx:
             user_content = goal_header + "\n\n" + "\n\n".join(extra_ctx)
