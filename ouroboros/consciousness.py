@@ -45,6 +45,33 @@ def _is_google_model(model: str) -> bool:
     return model.startswith("google/") or model.startswith("gemini")
 
 
+# Ordered list of hardcoded safe (non-Google) fallback models.
+# Used when OUROBOROS_MODEL itself is also a Google model.
+_SAFE_FALLBACK_CHAIN = [
+    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-3-5-haiku",
+    "anthropic/claude-3-haiku",
+    "openai/gpt-4o-mini",
+]
+
+
+def _safe_fallback_model() -> str:
+    """Return a non-Google fallback model for use when GOOGLE_API_KEY is absent.
+
+    Tries OUROBOROS_MODEL first (so user's preference is respected when possible),
+    then walks _SAFE_FALLBACK_CHAIN to guarantee we never return a Google model.
+    This prevents the infinite-error-loop where OUROBOROS_MODEL itself is a
+    Google model and every 'fallback' attempt also fails with GOOGLE_API_KEY errors.
+    """
+    main = os.environ.get("OUROBOROS_MODEL", "")
+    if main and not _is_google_model(main):
+        return main
+    for candidate in _SAFE_FALLBACK_CHAIN:
+        if not _is_google_model(candidate):
+            return candidate
+    return "anthropic/claude-haiku-4-5"  # last resort
+
+
 class BackgroundConsciousness:
     """Persistent background thinking loop for Ouroboros."""
 
@@ -86,7 +113,7 @@ class BackgroundConsciousness:
         # Checks both "google/*" and bare "gemini-*" model name forms.
         _light_model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
         if _is_google_model(_light_model) and not os.environ.get("GOOGLE_API_KEY"):
-            _fallback = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-haiku-4-5")
+            _fallback = _safe_fallback_model()
             self._model_override = _fallback
             log.info(
                 "consciousness: GOOGLE_API_KEY not configured — pre-emptively using "
@@ -108,9 +135,9 @@ class BackgroundConsciousness:
             return self._model_override
         model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
         # Dynamic guard: if this is a Google model but GOOGLE_API_KEY is absent,
-        # permanently switch to the main model so we never send a doomed request.
+        # permanently switch to a safe model so we never send a doomed request.
         if _is_google_model(model) and not os.environ.get("GOOGLE_API_KEY"):
-            fallback = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-haiku-4-5")
+            fallback = _safe_fallback_model()
             self._model_override = fallback
             log.warning(
                 "consciousness: Google model %r requires GOOGLE_API_KEY (not set); "
@@ -329,18 +356,20 @@ class BackgroundConsciousness:
             if "429" in error_str or "RateLimit" in error_str or "rate limit" in error_str.lower():
                 self._next_wakeup_sec = min(self._next_wakeup_sec * 3, 3600)
             # Google model unavailable (GOOGLE_API_KEY not configured in proxy/env):
-            # Switch to main Anthropic model permanently for this session so the
+            # Switch to a guaranteed non-Google model permanently for this session so the
             # consciousness loop continues working without constant 500 errors.
-            # Note: no "not self._model_override" guard — if the override itself is
-            # a Google model, we must still recover here.
+            # Uses _safe_fallback_model() to avoid the case where OUROBOROS_MODEL is
+            # itself a Google model (which would cause an infinite error loop).
             elif "GOOGLE_API_KEY" in error_str:
-                fallback = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-haiku-4-5")
-                if self._model_override != fallback:
+                fallback = _safe_fallback_model()
+                # Update override if it's missing OR if it's currently a Google model
+                # (possible when env sets OUROBOROS_MODEL to a Gemini model).
+                if not self._model_override or _is_google_model(self._model_override):
                     self._model_override = fallback
                     self._next_wakeup_sec = 60  # retry soon with new model
                     log.warning(
                         "consciousness: Google model unavailable (GOOGLE_API_KEY not configured), "
-                        "switching to fallback model %s", fallback
+                        "switching to safe fallback model %s", fallback
                     )
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
