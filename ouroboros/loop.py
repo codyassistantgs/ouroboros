@@ -543,6 +543,26 @@ def _maybe_compact_messages(
     return messages
 
 
+def _evolution_no_response_msg(active_model: str, max_retries: int, accumulated_usage: Dict[str, Any]) -> str:
+    """Build an informative message when an evolution task gets no LLM response.
+
+    Returns a specific 'paused: rate limit' message when a daily rate limit caused
+    the failure, falling back to the generic 'empty response' message otherwise.
+    """
+    if accumulated_usage.get("daily_rate_limit"):
+        ra_sec = float(accumulated_usage.get("rate_limit_resets_in_sec") or 28800)
+        resets_at = accumulated_usage.get("rate_limit_resets_at_utc") or "unknown"
+        hours = ra_sec / 3600
+        return (
+            f"⚠️ Evolution paused: daily API rate limit hit. "
+            f"Resets in ~{hours:.1f}h (at {resets_at}). Will resume automatically."
+        )
+    return (
+        f"⚠️ Evolution: model {active_model} returned empty response after {max_retries} attempts. "
+        f"No fallback for evolution tasks (requires Claude native tools)."
+    )
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -654,10 +674,7 @@ def run_llm_loop(
                 # Gemini/Groq without tool schemas would just return text descriptions of changes,
                 # not actual code modifications.
                 if task_type == "evolution":
-                    return (
-                        f"⚠️ Evolution: model {active_model} returned empty response after {max_retries} attempts. "
-                        f"No fallback for evolution tasks (requires Claude native tools)."
-                    ), accumulated_usage, llm_trace
+                    return _evolution_no_response_msg(active_model, max_retries, accumulated_usage), accumulated_usage, llm_trace
 
                 # Configurable fallback priority list (Bible P3: no hardcoded behavior)
                 # Default: use another Claude model so the local proxy can serve it without
@@ -894,6 +911,14 @@ def _call_llm_with_retry(
                         "resets_in_sec": float(ra),
                         "sleep_sec": 0,
                     })
+                    # Signal rate limit info to caller via accumulated_usage so
+                    # run_llm_loop can produce a specific "paused: rate limit" message
+                    # instead of the generic "empty response" text.
+                    import datetime as _dt
+                    _resets_at = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=float(ra))
+                    accumulated_usage["daily_rate_limit"] = True
+                    accumulated_usage["rate_limit_resets_in_sec"] = float(ra)
+                    accumulated_usage["rate_limit_resets_at_utc"] = _resets_at.strftime("%Y-%m-%dT%H:%M:%SZ")
                     return None, 0.0
             else:
                 sleep_sec = min(2 ** attempt * 2, 30)
