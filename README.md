@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.8 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.10 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,14 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.10 -- Fix evolution goal loss + model routing + proxy prompt formatting
+
+- **Fix (critical):** Proxy `messages_to_prompt` was prepending `"User: "` to user messages before passing them to Claude CLI as the primary prompt argument. This caused Claude to treat the message as a chat transcript and respond conversationally ("What would you like me to work on?") instead of executing the evolution task. The proxy now passes raw message content without role prefixes, preserving conversation history in the system prompt instead.
+- **Fix:** Evolution user message now starts with an explicit `TASK:` header so the goal is unambiguous to Claude CLI even after any proxy transformation.
+- **Fix:** `DEFAULT_LIGHT_MODEL` in `llm.py` was set to `google/gemini-3-pro-preview` which does not exist. Changed to `google/gemini-2.5-flash` which is available and fast.
+- **Fix:** Proxy `GEMINI_MODEL_MAP` now maps non-existent `gemini-3-*` model names to their closest `gemini-2.5-*` equivalents instead of forwarding them to the Google API and getting 404 errors.
+- **Fix:** `pricing.py` alias for `gemini-3-pro-preview` corrected to map to `google/gemini-2.5-pro-preview`; added `google/gemini-2.5-flash` pricing entry.
 
 ### v7.1.8 -- Fix evolution reliability: /evolve reset + no-session-persistence + circuit breaker
 - **Fix:** `/evolve` now resets `evolution_consecutive_failures` to 0 when enabling. Previously, re-enabling evolution via `/evolve` had no effect — the circuit breaker would immediately re-disable it on the next queue check because the failure counter was still at 3+.

@@ -28,7 +28,7 @@ MODEL_PRICING_STATIC: Dict[str, Tuple[float, float, float]] = {
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
     "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
-    "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
+    "google/gemini-2.5-flash": (0.075, 0.0075, 0.30),
     "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
     "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
 }
@@ -43,8 +43,10 @@ PROXY_MODEL_ALIASES: Dict[str, str] = {
     "claude-opus-4.6": "anthropic/claude-opus-4.6",
     "claude-haiku-4-5-20251001": "anthropic/claude-haiku-4-5-20251001",
     "gemini-2.5-pro": "google/gemini-2.5-pro-preview",
-    "gemini-2.5-flash": "google/gemini-2.5-flash-preview",
-    "gemini-3-pro-preview": "google/gemini-3-pro-preview",
+    "gemini-2.5-flash": "google/gemini-2.5-flash",
+    # gemini-3-* models do not exist — alias to closest available
+    "gemini-3-pro-preview": "google/gemini-2.5-pro-preview",
+    "gemini-3-pro": "google/gemini-2.5-pro-preview",
 }
 
 _pricing_fetched = False

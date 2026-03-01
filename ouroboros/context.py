@@ -371,6 +371,7 @@ def build_llm_messages(
         # Enrich user message with scratchpad + recent git log so agent has orientation
         # Without this, agent has zero context and often loses its goal entirely.
         task_text = task.get("text", "") or ""
+        repo_dir = str(env.repo_dir)
         extra_ctx: List[str] = []
 
         # Current scratchpad — tells agent what was diagnosed, what needs work
@@ -385,7 +386,7 @@ def build_llm_messages(
         try:
             import subprocess as _sp_ctx
             _git = _sp_ctx.run(
-                ["git", "-C", str(env.repo_dir), "log", "--oneline", "-8"],
+                ["git", "-C", repo_dir, "log", "--oneline", "-8"],
                 capture_output=True, text=True, timeout=10,
             )
             if _git.returncode == 0 and _git.stdout.strip():
@@ -393,10 +394,19 @@ def build_llm_messages(
         except Exception:
             pass
 
+        # Build the user message with the explicit goal at the top
+        # The goal line is placed first so it is immediately visible to the model
+        # even after any proxy transformation that might truncate or reformat.
+        goal_header = (
+            f"TASK: {task_text}\n\n"
+            f"Repository path: {repo_dir}\n"
+            f"Start immediately with Read/Grep/Glob tool calls to explore the code. "
+            f"Do NOT ask questions or describe what you plan to do — just do it."
+        )
         if extra_ctx:
-            user_content = task_text + "\n\n" + "\n\n".join(extra_ctx)
+            user_content = goal_header + "\n\n" + "\n\n".join(extra_ctx)
         else:
-            user_content = task_text
+            user_content = goal_header
 
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": _EVOLUTION_SYSTEM_PROMPT},
