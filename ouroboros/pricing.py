@@ -95,7 +95,14 @@ def estimate_cost(
     cached_tokens: int = 0,
     cache_write_tokens: int = 0,
 ) -> float:
-    """Estimate cost from token counts using known pricing. Returns 0.0 if model unknown."""
+    """Estimate cost from token counts using known pricing. Returns 0.0 if model unknown.
+
+    Token breakdown:
+      - prompt_tokens: total input tokens (regular + cached_read + cache_write)
+      - cached_tokens: cache-read tokens (cheaper, typically 0.1x input price)
+      - cache_write_tokens: cache-creation tokens (slightly more expensive, 1.25x input price)
+      - regular_input = prompt_tokens - cached_tokens - cache_write_tokens
+    """
     model_pricing = get_pricing()
     # Normalize short proxy model names to canonical IDs
     normalized = PROXY_MODEL_ALIASES.get(model, model)
@@ -116,11 +123,14 @@ def estimate_cost(
     if not pricing:
         return 0.0
     input_price, cached_price, output_price = pricing
-    # Non-cached input tokens = prompt_tokens - cached_tokens
-    regular_input = max(0, prompt_tokens - cached_tokens)
+    # Cache-write tokens cost 1.25x input price (Anthropic standard; reasonable default)
+    cache_write_price = input_price * 1.25
+    # Regular input = total prompt minus cache-read and cache-write portions
+    regular_input = max(0, prompt_tokens - cached_tokens - cache_write_tokens)
     cost = (
         regular_input * input_price / 1_000_000
         + cached_tokens * cached_price / 1_000_000
+        + cache_write_tokens * cache_write_price / 1_000_000
         + completion_tokens * output_price / 1_000_000
     )
     return round(cost, 6)

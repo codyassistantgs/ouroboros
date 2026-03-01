@@ -194,6 +194,78 @@ def test_estimate_tokens():
     assert 5 <= tokens <= 20
 
 
+def test_estimate_cost_basic():
+    """estimate_cost returns a positive value for a known model."""
+    from ouroboros.pricing import estimate_cost
+    cost = estimate_cost("anthropic/claude-sonnet-4.6", prompt_tokens=1000, completion_tokens=500)
+    assert cost > 0.0, "Known model should have positive cost"
+    # Sanity-check: 1000 input + 500 output at sonnet-4.6 prices
+    # ~(1000 * 3.0 + 500 * 15.0) / 1_000_000 = 0.0105
+    assert 0.001 <= cost <= 0.1, f"Cost out of expected range: {cost}"
+
+
+def test_estimate_cost_cache_write_increases_cost():
+    """cache_write_tokens increases estimated cost vs the same tokens counted as regular input."""
+    from ouroboros.pricing import estimate_cost
+    # All tokens as regular input
+    cost_no_write = estimate_cost(
+        "anthropic/claude-sonnet-4.6",
+        prompt_tokens=10000,
+        completion_tokens=500,
+        cached_tokens=0,
+        cache_write_tokens=0,
+    )
+    # Same total prompt tokens but half are cache-write (1.25x price)
+    cost_with_write = estimate_cost(
+        "anthropic/claude-sonnet-4.6",
+        prompt_tokens=10000,
+        completion_tokens=500,
+        cached_tokens=0,
+        cache_write_tokens=5000,
+    )
+    assert cost_with_write > cost_no_write, (
+        "cache_write_tokens should cost more than regular input (1.25x premium)"
+    )
+
+
+def test_estimate_cost_cache_read_reduces_cost():
+    """cached_tokens (cache reads) are cheaper than regular input."""
+    from ouroboros.pricing import estimate_cost
+    cost_no_cache = estimate_cost(
+        "anthropic/claude-sonnet-4.6",
+        prompt_tokens=10000,
+        completion_tokens=500,
+        cached_tokens=0,
+        cache_write_tokens=0,
+    )
+    cost_with_cache = estimate_cost(
+        "anthropic/claude-sonnet-4.6",
+        prompt_tokens=10000,
+        completion_tokens=500,
+        cached_tokens=8000,  # 80% cache hit
+        cache_write_tokens=0,
+    )
+    assert cost_with_cache < cost_no_cache, (
+        "cached_tokens (0.1x price) should cost less than regular input (1.0x price)"
+    )
+
+
+def test_estimate_cost_unknown_model_returns_zero():
+    """Unknown model returns 0.0 instead of raising."""
+    from ouroboros.pricing import estimate_cost
+    cost = estimate_cost("unknown/no-such-model", prompt_tokens=1000, completion_tokens=500)
+    assert cost == 0.0
+
+
+def test_estimate_cost_proxy_alias():
+    """Short proxy model names (e.g. claude-sonnet-4-6) resolve correctly."""
+    from ouroboros.pricing import estimate_cost
+    cost_short = estimate_cost("claude-sonnet-4-6", prompt_tokens=1000, completion_tokens=500)
+    cost_full = estimate_cost("anthropic/claude-sonnet-4.6", prompt_tokens=1000, completion_tokens=500)
+    assert cost_short > 0.0, "Proxy alias should resolve to a known model"
+    assert cost_short == cost_full, "Short alias and full name should give same cost"
+
+
 # ── Memory ───────────────────────────────────────────────────────
 
 def test_memory_scratchpad():

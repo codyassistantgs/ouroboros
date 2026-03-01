@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.11 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.12 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,11 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.12 -- Fix estimate_cost: cache_write_tokens now included in cost calculation
+
+- **Fix:** `estimate_cost` in `pricing.py` accepted `cache_write_tokens` as a parameter but silently ignored it, underestimating costs whenever Anthropic prompt cache writes occurred. Cache-write tokens now correctly contribute `input_price × 1.25` per token (Anthropic standard), and `regular_input` is computed as `prompt_tokens − cached_tokens − cache_write_tokens` to avoid double-counting.
+- **Tests:** Added 5 new unit tests in `test_smoke.py` covering: basic cost calculation, cache-write premium vs regular input, cache-read discount, unknown-model zero return, and proxy alias resolution.
 
 ### v7.1.10 -- Fix evolution goal loss + model routing + proxy prompt formatting
 
