@@ -529,6 +529,9 @@ class OuroborosAgent:
             "total_rounds": int(usage.get("rounds") or 0),
             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
             "completion_tokens": int(usage.get("completion_tokens") or 0),
+            # Propagate daily rate-limit flag so _handle_task_done can skip the
+            # circuit breaker when the model ran fine but hit a daily limit later.
+            "daily_rate_limit": bool(usage.get("daily_rate_limit")),
             "ts": utc_now_iso(),
         })
         append_jsonl(drive_logs / "events.jsonl", {
@@ -540,6 +543,7 @@ class OuroborosAgent:
             "total_rounds": int(usage.get("rounds") or 0),
             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
             "completion_tokens": int(usage.get("completion_tokens") or 0),
+            "daily_rate_limit": bool(usage.get("daily_rate_limit")),
         })
 
         # Store task result for parent task retrieval

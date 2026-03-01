@@ -119,8 +119,11 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         completion_tokens = int(evt.get("completion_tokens") or 0)
         _text_success = (cost > 0.10 or completion_tokens > 200) and rounds >= 1
         # API/infra error: model never ran at all (rate limit, service outage, etc.)
+        # Also catches the case where round 1 ran but a later round hit a daily rate limit
+        # (rounds>0, tokens>0 — the simple zero-check would miss this).
         # Don't count these as evolution logic failures to avoid tripping circuit breaker.
-        _api_error = (rounds == 0 and completion_tokens == 0 and cost == 0)
+        _daily_rate_limit = bool(evt.get("daily_rate_limit"))
+        _api_error = (rounds == 0 and completion_tokens == 0 and cost == 0) or _daily_rate_limit
 
         if _evolution_committed:
             # Real success: new code committed to git
