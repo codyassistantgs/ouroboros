@@ -45,6 +45,45 @@ def _is_google_model(model: str) -> bool:
     return model.startswith("google/") or model.startswith("gemini")
 
 
+def _probe_google_available() -> bool:
+    """Return True if Google models are actually usable from the LLM backend.
+
+    The GOOGLE_API_KEY env var in the ouroboros process is NOT sufficient —
+    when OPENROUTER_BASE_URL points to a local proxy (e.g. claude-proxy), that
+    proxy process has its OWN environment and may not have GOOGLE_API_KEY set
+    (e.g. systemd service without EnvironmentFile directive).
+
+    Strategy:
+    1. If using real OpenRouter → trust local env var.
+    2. If using a local proxy → call its /health endpoint; trust
+       ``google_api_available`` field if present.
+    3. Fallback: trust local env var.
+    """
+    google_env = bool(os.environ.get("GOOGLE_API_KEY"))
+    base_url = os.environ.get("OPENROUTER_BASE_URL", "")
+
+    # Using real OpenRouter — env var is the source of truth
+    if not base_url or "openrouter.ai" in base_url:
+        return google_env
+
+    # Local proxy detected — probe its /health endpoint to check its own env
+    try:
+        import urllib.request as _ureq
+        import json as _json
+        health_url = base_url.rstrip("/")
+        if health_url.endswith("/v1"):
+            health_url = health_url[:-3]
+        health_url += "/health"
+        with _ureq.urlopen(health_url, timeout=2) as resp:  # noqa: S310
+            data = _json.loads(resp.read())
+            if "google_api_available" in data:
+                return bool(data["google_api_available"])
+    except Exception:
+        pass  # health probe failed — fall through to env-var fallback
+
+    return google_env
+
+
 # Ordered list of hardcoded safe (non-Google) fallback models.
 # Used when OUROBOROS_MODEL itself is also a Google model.
 _SAFE_FALLBACK_CHAIN = [
@@ -109,16 +148,22 @@ class BackgroundConsciousness:
         self._model_override: Optional[str] = None
 
         # Proactive startup check: if the configured light model is a Google model but
-        # GOOGLE_API_KEY is not set, pre-set the override NOW to avoid the first-call 500 error.
-        # Checks both "google/*" and bare "gemini-*" model name forms.
+        # the backend (proxy or OpenRouter) cannot serve it, pre-set the override NOW
+        # to avoid a 500 error on the very first consciousness wakeup.
+        #
+        # Key insight: GOOGLE_API_KEY in the *current* process env is NOT sufficient —
+        # when OPENROUTER_BASE_URL points to a local proxy (e.g. claude-proxy running
+        # via systemd), that proxy may have its own empty environment. We therefore
+        # probe the proxy's /health endpoint to get the *proxy's* view of Google
+        # availability, rather than relying solely on the local env var.
         _light_model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
-        if _is_google_model(_light_model) and not os.environ.get("GOOGLE_API_KEY"):
+        if _is_google_model(_light_model) and not _probe_google_available():
             _fallback = _safe_fallback_model()
             self._model_override = _fallback
             log.info(
-                "consciousness: GOOGLE_API_KEY not configured — pre-emptively using "
-                "fallback model %s instead of %s to avoid 500 errors",
-                _fallback, _light_model,
+                "consciousness: Google model %r unavailable on backend — "
+                "pre-emptively using fallback model %s to avoid 500 errors",
+                _light_model, _fallback,
             )
 
     # -------------------------------------------------------------------
@@ -134,13 +179,16 @@ class BackgroundConsciousness:
         if self._model_override:
             return self._model_override
         model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
-        # Dynamic guard: if this is a Google model but GOOGLE_API_KEY is absent,
+        # Dynamic guard: if this is a Google model but the backend can't serve it,
         # permanently switch to a safe model so we never send a doomed request.
-        if _is_google_model(model) and not os.environ.get("GOOGLE_API_KEY"):
+        # Uses _probe_google_available() which checks the actual proxy's capability,
+        # not just the local process env var (they can differ when using a systemd
+        # proxy without EnvironmentFile).
+        if _is_google_model(model) and not _probe_google_available():
             fallback = _safe_fallback_model()
             self._model_override = fallback
             log.warning(
-                "consciousness: Google model %r requires GOOGLE_API_KEY (not set); "
+                "consciousness: Google model %r not available on backend; "
                 "switching to fallback %s",
                 model, fallback,
             )
@@ -242,8 +290,13 @@ class BackgroundConsciousness:
     # Think cycle
     # -------------------------------------------------------------------
 
-    def _think(self) -> None:
-        """One thinking cycle: build context, call LLM, execute tools iteratively."""
+    def _think(self, _retry_attempt: int = 0) -> None:
+        """One thinking cycle: build context, call LLM, execute tools iteratively.
+
+        ``_retry_attempt`` is used internally to prevent infinite recursion when
+        the primary model fails with a GOOGLE_API_KEY error and we retry with the
+        safe fallback model.  External callers must NOT pass this argument.
+        """
         self._maybe_schedule_arch_review()
         context = self._build_context()
         model = self._model
@@ -366,11 +419,25 @@ class BackgroundConsciousness:
                 # (possible when env sets OUROBOROS_MODEL to a Gemini model).
                 if not self._model_override or _is_google_model(self._model_override):
                     self._model_override = fallback
-                    self._next_wakeup_sec = 60  # retry soon with new model
                     log.warning(
                         "consciousness: Google model unavailable (GOOGLE_API_KEY not configured), "
                         "switching to safe fallback model %s", fallback
                     )
+                # On the FIRST attempt, retry immediately with the new model rather than
+                # waiting for the next scheduled wakeup (which could be 60+ seconds away).
+                # This prevents a full lost wakeup cycle every time the container restarts
+                # and the pre-emptive Google availability check fails to detect the issue.
+                if _retry_attempt == 0:
+                    log.info(
+                        "consciousness: retrying think cycle with fallback model %s", fallback
+                    )
+                    try:
+                        self._think(_retry_attempt=1)
+                        return  # retry succeeded — do not log consciousness_llm_error
+                    except Exception:
+                        pass  # retry also failed; fall through to error logging
+                else:
+                    self._next_wakeup_sec = 60  # retry failed — give up and wait
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "consciousness_llm_error",
