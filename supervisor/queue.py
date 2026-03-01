@@ -34,6 +34,11 @@ HARD_TIMEOUT_SEC: int = 1800
 HEARTBEAT_STALE_SEC: int = 120
 QUEUE_MAX_RETRIES: int = 1
 
+# Debounce tracker: epoch of the last rate-limit window notification sent to
+# the owner.  Module-level (not state-based) since we only need per-process
+# dedup — restarting the supervisor clears it, which is fine.
+_last_rl_notification_ts: float = 0.0
+
 
 def init(drive_root: pathlib.Path, soft_timeout: int, hard_timeout: int) -> None:
     global DRIVE_ROOT, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
@@ -375,6 +380,62 @@ def queue_review_task(reason: str, force: bool = False) -> Optional[str]:
     return tid
 
 
+def _check_rate_limit_window(drive_root: pathlib.Path) -> Optional[float]:
+    """Return seconds remaining in a daily rate-limit window, or None if not rate-limited.
+
+    Scans the last 200 lines of events.jsonl for ``llm_api_error`` events with
+    ``daily_limit=True``.  If the most-recent such event's reset time is still in
+    the future we are still inside the rate-limit window and evolution should be
+    deferred.
+
+    The reset time is reconstructed as: event_timestamp + resets_in_sec.
+    ``resets_in_sec`` is set by ``extract_retry_after()`` in utils.py which
+    converts wall-clock reset times ("resets 8pm UTC") to absolute seconds,
+    so adding it to the event timestamp gives the correct reset epoch.
+
+    Returns None if no active rate limit window is found (safe to proceed).
+    """
+    events_path = drive_root / "logs" / "events.jsonl"
+    if not events_path.exists():
+        return None
+    try:
+        import subprocess as _sp_rl
+        _tail = _sp_rl.run(
+            ["tail", "-n", "200", str(events_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        lines = (_tail.stdout or "").splitlines()
+        now = time.time()
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+                if ev.get("type") != "llm_api_error":
+                    continue
+                if not ev.get("daily_limit"):
+                    continue
+                # Found a daily-rate-limit event — compute reset epoch
+                ev_ts_str = str(ev.get("ts") or "")
+                resets_in_sec = float(ev.get("resets_in_sec") or 0)
+                if not ev_ts_str or resets_in_sec <= 0:
+                    continue
+                ev_ts = datetime.datetime.fromisoformat(
+                    ev_ts_str.replace("Z", "+00:00")
+                ).timestamp()
+                reset_at = ev_ts + resets_in_sec
+                if reset_at > now:
+                    return reset_at - now  # still inside the rate-limit window
+                # Rate limit has already reset — stop scanning older events
+                return None
+            except Exception:
+                continue
+    except Exception:
+        log.debug("_check_rate_limit_window failed", exc_info=True)
+    return None
+
+
 def _check_model_api_health(drive_root: pathlib.Path, lookback: int = 3) -> bool:
     """Return True if evolution can proceed, False if model API appears unhealthy.
 
@@ -457,6 +518,31 @@ def enqueue_evolution_task_if_needed() -> None:
             f"🧬⚠️ Evolution paused: {consecutive_failures} consecutive failures. "
             f"Use /evolve start to resume after investigating the issue."
         )
+        return
+
+    # Rate-limit window check: if the most-recent LLM call produced a daily rate
+    # limit error (resets hours from now), do not schedule a new evolution task
+    # until the window has passed.  Without this check, evolution tasks would be
+    # queued back-to-back, each failing immediately with the same 429, burning
+    # budget-quota tracking noise and flooding supervisor.jsonl.
+    rl_remaining = _check_rate_limit_window(DRIVE_ROOT)
+    if rl_remaining is not None and rl_remaining > 0:
+        global _last_rl_notification_ts
+        hours = rl_remaining / 3600
+        log.info(
+            "Evolution skipped: rate limit still active for %.0fs (%.1fh)",
+            rl_remaining, hours,
+        )
+        # Notify owner at most once every 2 hours per rate-limit window to avoid
+        # flooding the chat on every supervisor tick (~5s) during the window.
+        if owner_chat_id and rl_remaining > 300:
+            if time.time() - _last_rl_notification_ts > 7200:
+                send_with_budget(
+                    int(owner_chat_id),
+                    f"🧬⏳ Evolution paused: API rate limit active for ~{hours:.1f}h more. "
+                    f"Will resume automatically after reset.",
+                )
+                _last_rl_notification_ts = time.time()
         return
 
     # Fix C: Pre-flight model API health check
