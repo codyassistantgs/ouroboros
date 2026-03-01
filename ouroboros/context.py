@@ -99,12 +99,24 @@ def _build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
     return "## Runtime context\n\n" + runtime_ctx
 
 
-def _build_memory_sections(memory: Memory) -> List[str]:
+def _build_memory_sections(memory: Memory, task_text: str = "") -> List[str]:
     """Build scratchpad, identity, user context, dialogue summary sections."""
     sections = []
 
+    # mem0 semantic recall — efficient retrieval of relevant past context
+    if task_text:
+        try:
+            from ouroboros.mem0_client import get_mem0_client
+            _m0 = get_mem0_client()
+            if _m0:
+                _relevant = _m0.recall(task_text, limit=10)
+                if _relevant:
+                    sections.append("## Relevant memories (mem0)\n\n" + _relevant)
+        except Exception:
+            log.debug("mem0 recall failed", exc_info=True)
+
     scratchpad_raw = memory.load_scratchpad()
-    sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000))
+    sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, 40000))
 
     identity_raw = memory.load_identity()
     sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
@@ -514,7 +526,7 @@ def build_llm_messages(
     # Semi-stable content: identity, scratchpad, knowledge
     # These change ~once per task, not per round
     semi_stable_parts = []
-    semi_stable_parts.extend(_build_memory_sections(memory))
+    semi_stable_parts.extend(_build_memory_sections(memory, task_text=task.get("text", "") or ""))
 
     kb_index_path = env.drive_path("memory/knowledge/_index.md")
     if kb_index_path.exists():
@@ -529,6 +541,12 @@ def build_llm_messages(
         "## Drive state\n\n" + clip_text(state_json, 90000),
         _build_runtime_section(env, task),
     ]
+    # Session resume point — updated by agent via update_current_task tool
+    _ct_path = env.drive_path("memory/CURRENT_TASK.md")
+    if _ct_path.exists():
+        _ct_text = read_text(_ct_path)
+        if _ct_text.strip():
+            dynamic_parts.insert(0, "## Current Task (resume point)\n\n" + clip_text(_ct_text, 2000))
 
     # Health invariants — surfaces anomalies for LLM-first self-detection
     health_section = _build_health_invariants(env)

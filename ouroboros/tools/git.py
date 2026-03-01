@@ -194,7 +194,7 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("repo_commit_push", {
             "name": "repo_commit_push",
-            "description": "Commit + push already-changed files. Does pull --rebase before push.",
+            "description": "Commit + push already-changed files. Does pull --rebase before push. Preferred format: 'v{X.Y.Z}: brief desc\\n\\nNEXT: concrete next step\\nCONTEXT: why this matters' — makes git log a reliable resume tool.",
             "parameters": {"type": "object", "properties": {
                 "commit_message": {"type": "string"},
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "Files to add (empty = git add -A)"},

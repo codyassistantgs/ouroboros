@@ -309,6 +309,59 @@ Now write a comprehensive summary:"""
         return f"⚠️ Error: {repr(e)}"
 
 
+
+
+# ---------------------------------------------------------------------------
+# mem0 long-term memory tools
+# ---------------------------------------------------------------------------
+
+def _mem0_remember(ctx: ToolContext, content: str, category: str = "general") -> str:
+    """Save an important fact, decision, or lesson to long-term semantic memory."""
+    try:
+        from ouroboros.mem0_client import get_mem0_client
+        m = get_mem0_client()
+        if m is None:
+            return "⚠️ mem0 not available (check GOOGLE_API_KEY and mem0ai installation)"
+        ok = m.remember(content, category=category)
+        return f"OK: saved to long-term memory (category={category})" if ok else "⚠️ mem0 save failed"
+    except Exception as e:
+        return f"⚠️ mem0_remember error: {e}"
+
+
+def _mem0_recall(ctx: ToolContext, query: str, limit: int = 8) -> str:
+    """Search long-term semantic memory for relevant context."""
+    try:
+        from ouroboros.mem0_client import get_mem0_client
+        m = get_mem0_client()
+        if m is None:
+            return "⚠️ mem0 not available (check GOOGLE_API_KEY and mem0ai installation)"
+        result = m.recall(query, limit=limit)
+        return result if result else "(no relevant memories found for this query)"
+    except Exception as e:
+        return f"⚠️ mem0_recall error: {e}"
+
+
+def _update_current_task(
+    ctx: ToolContext,
+    task: str,
+    status: str = "in_progress",
+    done: str = "",
+    next_step: str = "",
+    blockers: str = "нет",
+) -> str:
+    """Update /data/memory/CURRENT_TASK.md — session resume point."""
+    from ouroboros.utils import utc_now_iso
+    content = (
+        "# CURRENT_TASK\n"
+        f"**Задача**: {task}\n"
+        f"**Статус**: {status}\n"
+        f"**Сделано**: {done or '-'}\n"
+        f"**Следующий шаг**: {next_step or '-'}\n"
+        f"**Блокеры**: {blockers}\n"
+        f"**Обновлено**: {utc_now_iso()}\n"
+    )
+    return _drive_write(ctx, "memory/CURRENT_TASK.md", content)
+
 # ---------------------------------------------------------------------------
 # forward_to_worker — LLM-initiated message routing to worker tasks
 # ---------------------------------------------------------------------------
@@ -385,6 +438,33 @@ def get_tools() -> List[ToolEntry]:
                 "last_n": {"type": "integer", "description": "Number of recent messages to summarize (default 200)"},
             }, "required": []},
         }, _summarize_dialogue),
+        ToolEntry("mem0_remember", {
+            "name": "mem0_remember",
+            "description": "Save an important fact, decision, or lesson to long-term semantic memory (mem0). Use after completing tasks to preserve key insights for future sessions.",
+            "parameters": {"type": "object", "properties": {
+                "content": {"type": "string", "description": "The fact or insight to remember"},
+                "category": {"type": "string", "description": "Category tag (e.g. task, lesson, user_pref, error_fix)", "default": "general"},
+            }, "required": ["content"]},
+        }, _mem0_remember),
+        ToolEntry("mem0_recall", {
+            "name": "mem0_recall",
+            "description": "Search long-term semantic memory (mem0) for relevant past context. Use at task start to retrieve related work and lessons learned.",
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "What to search for in memory"},
+                "limit": {"type": "integer", "description": "Max results (default 8)", "default": 8},
+            }, "required": ["query"]},
+        }, _mem0_recall),
+        ToolEntry("update_current_task", {
+            "name": "update_current_task",
+            "description": "Update the session resume point (CURRENT_TASK.md). MUST be called: (1) at START of each task, (2) before any session end. Ensures zero task loss across restarts.",
+            "parameters": {"type": "object", "properties": {
+                "task": {"type": "string", "description": "Current task description"},
+                "status": {"type": "string", "enum": ["in_progress", "done", "blocked", "idle"], "default": "in_progress"},
+                "done": {"type": "string", "description": "What has been completed so far"},
+                "next_step": {"type": "string", "description": "CONCRETE next action to take when resuming"},
+                "blockers": {"type": "string", "description": "What is blocking progress", "default": "нет"},
+            }, "required": ["task"]},
+        }, _update_current_task),
         ToolEntry("forward_to_worker", {
             "name": "forward_to_worker",
             "description": (
