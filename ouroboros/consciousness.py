@@ -55,9 +55,15 @@ def _probe_google_available() -> bool:
 
     Strategy:
     1. If using real OpenRouter → trust local env var.
-    2. If using a local proxy → call its /health endpoint; trust
-       ``google_api_available`` field if present.
-    3. Fallback: trust local env var.
+    2. If using a local proxy → call its /health endpoint:
+       a. ``google_api_available`` field present → trust it.
+       b. Endpoint reachable but field absent → trust local env var
+          (unknown proxy type, give benefit of the doubt).
+       c. Endpoint unreachable (proxy down/starting) → return False.
+          When the proxy itself is unreachable we CANNOT use any model
+          via it anyway; returning False prevents a wasted Google model
+          attempt that would get a 500 error once the proxy comes back up
+          (and the first real call will retry with the fallback model).
     """
     google_env = bool(os.environ.get("GOOGLE_API_KEY"))
     base_url = os.environ.get("OPENROUTER_BASE_URL", "")
@@ -66,7 +72,14 @@ def _probe_google_available() -> bool:
     if not base_url or "openrouter.ai" in base_url:
         return google_env
 
-    # Local proxy detected — probe its /health endpoint to check its own env
+    # Local proxy detected — probe its /health endpoint to check its own env.
+    # NOTE: If the probe fails (proxy down, timeout, connection refused), we
+    # return False rather than falling back to google_env.  The rationale:
+    # when the proxy is unreachable, using a Google model would fail anyway,
+    # and once the proxy comes up the first wakeup will try Google → get the
+    # GOOGLE_API_KEY error → switch to fallback (v7.1.20 retry logic).
+    # Returning False here avoids the first-wakeup error entirely by setting
+    # the override at startup instead of after the first failure.
     try:
         import urllib.request as _ureq
         import json as _json
@@ -78,10 +91,18 @@ def _probe_google_available() -> bool:
             data = _json.loads(resp.read())
             if "google_api_available" in data:
                 return bool(data["google_api_available"])
+            # Proxy responded but didn't report google_api_available — unknown
+            # proxy type; fall back to local env var (give benefit of the doubt).
+            return google_env
     except Exception:
-        pass  # health probe failed — fall through to env-var fallback
-
-    return google_env
+        # Probe failed: proxy unreachable, timeout, bad JSON, etc.
+        # Treat Google as unavailable — safer than assuming it works.
+        log.debug(
+            "consciousness: /health probe failed for local proxy %r — "
+            "assuming Google unavailable (will retry with fallback if needed)",
+            base_url,
+        )
+        return False
 
 
 # Ordered list of hardcoded safe (non-Google) fallback models.
@@ -146,6 +167,9 @@ class BackgroundConsciousness:
         )
         # Model override: set when primary model is unavailable (e.g. GOOGLE_API_KEY missing)
         self._model_override: Optional[str] = None
+        # Consecutive GOOGLE_API_KEY error counter — used to apply progressive
+        # backoff so a misconfigured proxy doesn't cause a 60-second retry storm.
+        self._consecutive_google_errors: int = 0
 
         # Proactive startup check: if the configured light model is a Google model but
         # the backend (proxy or OpenRouter) cannot serve it, pre-set the override NOW
@@ -394,6 +418,9 @@ class BackgroundConsciousness:
                         self._event_queue.put(evt)
 
             # Log the thought with round count
+            # Reset consecutive error counter on success (outer call only)
+            if _retry_attempt == 0:
+                self._consecutive_google_errors = 0
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "consciousness_thought",
@@ -437,12 +464,32 @@ class BackgroundConsciousness:
                     except Exception:
                         pass  # retry also failed; fall through to error logging
                 else:
-                    self._next_wakeup_sec = 60  # retry failed — give up and wait
+                    # Retry also failed — track consecutive errors and apply
+                    # progressive backoff to prevent 60-second storm loops.
+                    self._consecutive_google_errors += 1
+                    if self._consecutive_google_errors >= 5:
+                        # After 5 consecutive double-failures, back off for 1 hour.
+                        # This prevents an indefinite 60s retry loop when both the
+                        # primary and fallback models keep failing.
+                        self._next_wakeup_sec = 3600
+                        log.warning(
+                            "consciousness: %d consecutive GOOGLE_API_KEY errors "
+                            "(primary + fallback both failing); backing off 1 hour",
+                            self._consecutive_google_errors,
+                        )
+                    elif self._consecutive_google_errors >= 2:
+                        # 2-4 consecutive double-failures → moderate backoff
+                        self._next_wakeup_sec = min(
+                            300 * self._consecutive_google_errors, 3600
+                        )
+                    else:
+                        self._next_wakeup_sec = 60  # first retry failure — brief wait
             append_jsonl(self._drive_root / "logs" / "events.jsonl", {
                 "ts": utc_now_iso(),
                 "type": "consciousness_llm_error",
                 "error": error_str,
                 "model_override": self._model_override,
+                "consecutive_google_errors": self._consecutive_google_errors,
             })
 
     # -------------------------------------------------------------------
