@@ -368,9 +368,39 @@ def build_llm_messages(
     # necessary" which directly conflicts with evolution's tool-use-first requirement.
     # Using a minimal prompt ensures Claude immediately starts making code changes.
     if task_type == "evolution":
+        # Enrich user message with scratchpad + recent git log so agent has orientation
+        # Without this, agent has zero context and often loses its goal entirely.
+        task_text = task.get("text", "") or ""
+        extra_ctx: List[str] = []
+
+        # Current scratchpad — tells agent what was diagnosed, what needs work
+        try:
+            scratchpad_raw = memory.load_scratchpad()
+            if scratchpad_raw and scratchpad_raw.strip():
+                extra_ctx.append("## Your Current Scratchpad\n\n" + clip_text(scratchpad_raw, 2000))
+        except Exception:
+            pass
+
+        # Recent git commits — shows what was already fixed, avoids re-doing
+        try:
+            import subprocess as _sp_ctx
+            _git = _sp_ctx.run(
+                ["git", "-C", str(env.repo_dir), "log", "--oneline", "-8"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if _git.returncode == 0 and _git.stdout.strip():
+                extra_ctx.append("## Recent Git Commits\n\n" + _git.stdout.strip())
+        except Exception:
+            pass
+
+        if extra_ctx:
+            user_content = task_text + "\n\n" + "\n\n".join(extra_ctx)
+        else:
+            user_content = task_text
+
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": _EVOLUTION_SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_content(task)},
+            {"role": "user", "content": user_content},
         ]
         return messages, {}
 

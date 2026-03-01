@@ -106,7 +106,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         _repo_dir = "/home/gocha/ouroboros"
         try:
             _git = _sp.run(
-                ["git", "-C", _repo_dir, "log", "--oneline", "--since=35 minutes ago"],
+                ["git", "-C", _repo_dir, "log", "--oneline", "--since=90 minutes ago"],
                 capture_output=True, text=True, timeout=10,
             )
             _evolution_committed = bool(_git.returncode == 0 and _git.stdout.strip())
@@ -118,6 +118,9 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         rounds = int(evt.get("total_rounds") or 0)
         completion_tokens = int(evt.get("completion_tokens") or 0)
         _text_success = (cost > 0.10 or completion_tokens > 200) and rounds >= 1
+        # API/infra error: model never ran at all (rate limit, service outage, etc.)
+        # Don't count these as evolution logic failures to avoid tripping circuit breaker.
+        _api_error = (rounds == 0 and completion_tokens == 0 and cost == 0)
 
         if _evolution_committed:
             # Real success: new code committed to git
@@ -128,6 +131,18 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                 {
                     "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "type": "evolution_committed",
+                    "task_id": task_id,
+                },
+            )
+        elif _api_error:
+            # Infrastructure failure — model unreachable (rate limit, outage).
+            # Don't increment consecutive_failures; circuit breaker should not trip on outages.
+            log.warning("Evolution task %s: API error (0 rounds/tokens/cost), skipping failure count", task_id)
+            ctx.append_jsonl(
+                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "type": "evolution_api_error_skipped",
                     "task_id": task_id,
                 },
             )
