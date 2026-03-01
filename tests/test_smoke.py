@@ -188,6 +188,28 @@ def test_clip_text():
     assert result_short == short_text, "Short text should pass through unchanged"
 
 
+def test_truncate_tool_result_short():
+    """Short results pass through unchanged."""
+    from ouroboros.loop import _truncate_tool_result
+    result = _truncate_tool_result("short output")
+    assert result == "short output"
+
+
+def test_truncate_tool_result_preserves_head_and_tail():
+    """Long results preserve both head and tail (not head-only)."""
+    from ouroboros.loop import _truncate_tool_result
+    # Build a string longer than 15000 chars with distinct head/tail markers
+    head_marker = "HEAD_MARKER_START"
+    tail_marker = "TAIL_MARKER_END"
+    # ~16000 chars total: head marker + padding + tail marker
+    long_result = head_marker + ("x" * 15970) + tail_marker
+    truncated = _truncate_tool_result(long_result)
+    assert head_marker in truncated, "Head of result must be preserved"
+    assert tail_marker in truncated, "Tail of result must be preserved (head+tail, not head-only)"
+    assert len(truncated) < len(long_result), "Result must be shorter than original"
+    assert "omitted" in truncated, "Truncation note must mention omitted chars"
+
+
 def test_estimate_tokens():
     from ouroboros.utils import estimate_tokens
     tokens = estimate_tokens("Hello world, this is a test.")

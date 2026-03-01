@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.12 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.14 | [Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,12 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.14 -- head+tail tool result truncation + version sync fix
+
+- **Improvement:** `_truncate_tool_result` in `loop.py` now uses head+tail preservation (7000 chars each) instead of head-only truncation. Previously, long tool outputs (shell commands, file reads) silently discarded end-of-output data — error messages, final results, command summaries — because only the first 15000 chars were kept. With head+tail, the LLM sees both the beginning and the end of any long output within the same 15000-char budget.
+- **Fix:** Version sync: `pyproject.toml` and README badge were stuck at `7.1.12` after v7.1.13 commit.
+- **Tests:** Added two unit tests for `_truncate_tool_result`: short passthrough and head+tail preservation of both markers.
 
 ### v7.1.13 -- Fix critical deploy gap: code volume mount in docker-compose
 

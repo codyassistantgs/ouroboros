@@ -46,14 +46,20 @@ STATEFUL_BROWSER_TOOLS = frozenset({"browse_page", "browser_action"})
 
 def _truncate_tool_result(result: Any) -> str:
     """
-    Hard-cap tool result string to 15000 characters.
-    If truncated, append a note with the original length.
+    Hard-cap tool result string to 15000 characters using head+tail preservation.
+
+    Head-only truncation loses end-of-output data (error messages, final results).
+    Head+tail preserves both beginning and end within the same character budget,
+    so the LLM can see command output start AND final error/summary at the end.
     """
     result_str = str(result)
     if len(result_str) <= 15000:
         return result_str
     original_len = len(result_str)
-    return result_str[:15000] + f"\n... (truncated from {original_len} chars)"
+    head = result_str[:7000]
+    tail = result_str[-7000:]
+    omitted = original_len - 14000
+    return head + f"\n... ({omitted} chars omitted) ...\n" + tail
 
 
 def _execute_single_tool(
