@@ -72,6 +72,18 @@ class BackgroundConsciousness:
         # Model override: set when primary model is unavailable (e.g. GOOGLE_API_KEY missing)
         self._model_override: Optional[str] = None
 
+        # Proactive startup check: if the configured light model is a Google model but
+        # GOOGLE_API_KEY is not set, pre-set the override NOW to avoid the first-call 500 error.
+        _light_model = os.environ.get("OUROBOROS_MODEL_LIGHT", "") or DEFAULT_LIGHT_MODEL
+        if _light_model.startswith("google/") and not os.environ.get("GOOGLE_API_KEY"):
+            _fallback = os.environ.get("OUROBOROS_MODEL", "anthropic/claude-haiku-4-5")
+            self._model_override = _fallback
+            log.info(
+                "consciousness: GOOGLE_API_KEY not configured — pre-emptively using "
+                "fallback model %s instead of %s to avoid 500 errors",
+                _fallback, _light_model,
+            )
+
     # -------------------------------------------------------------------
     # Lifecycle
     # -------------------------------------------------------------------
