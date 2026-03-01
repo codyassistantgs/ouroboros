@@ -343,6 +343,7 @@ def extract_retry_after(exc: Exception) -> Optional[float]:
     Checks (in order):
     1. .response.headers["retry-after"] (openai SDK httpx response)
     2. Regex patterns in repr(exc) for common Retry-After formats
+    3. Wall-clock reset times like "resets 8pm (UTC)" or "resets 20:00 UTC"
     Returns None if no delay hint found (caller should use default backoff).
     """
     import re as _re
@@ -371,6 +372,39 @@ def extract_retry_after(exc: Exception) -> Optional[float]:
                 return float(m.group(1))
             except (ValueError, TypeError):
                 pass
+
+    # Parse wall-clock reset times: "resets 8pm (UTC)", "resets 11pm (UTC)"
+    m = _re.search(r"resets\s+(\d{1,2})\s*(am|pm)\s*\(?UTC\)?", error_str, _re.IGNORECASE)
+    if m:
+        try:
+            hour = int(m.group(1))
+            period = m.group(2).lower()
+            if period == "pm" and hour != 12:
+                hour += 12
+            elif period == "am" and hour == 12:
+                hour = 0
+            now_utc = _dt.datetime.now(_dt.timezone.utc)
+            reset_time = now_utc.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if reset_time <= now_utc:
+                reset_time += _dt.timedelta(days=1)
+            return (reset_time - now_utc).total_seconds()
+        except (ValueError, TypeError):
+            pass
+
+    # Parse 24h wall-clock reset times: "resets 20:00 UTC", "resets 23:00 (UTC)"
+    m = _re.search(r"resets\s+(\d{1,2}):(\d{2})\s*\(?UTC\)?", error_str, _re.IGNORECASE)
+    if m:
+        try:
+            hour = int(m.group(1))
+            minute = int(m.group(2))
+            now_utc = _dt.datetime.now(_dt.timezone.utc)
+            reset_time = now_utc.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if reset_time <= now_utc:
+                reset_time += _dt.timedelta(days=1)
+            return (reset_time - now_utc).total_seconds()
+        except (ValueError, TypeError):
+            pass
+
     return None
 
 

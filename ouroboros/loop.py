@@ -880,6 +880,21 @@ def _call_llm_with_retry(
             if rl:
                 ra = extract_retry_after(e)
                 sleep_sec = min(float(ra) + 1.0, 3600.0) if ra is not None else min(30 * (4 ** attempt), 3600.0)
+                # Daily rate limit (resets hours away): fail immediately to avoid blocking worker
+                if ra is not None and float(ra) > 1800:
+                    log.warning(
+                        "Daily rate limit hit, resets in %.0fs (>30min) — failing fast, no retries",
+                        float(ra),
+                    )
+                    append_jsonl(drive_logs / "events.jsonl", {
+                        "ts": utc_now_iso(), "type": "llm_api_error",
+                        "task_id": task_id, "round": round_idx, "attempt": attempt + 1,
+                        "model": model, "error": repr(e),
+                        "is_rate_limit": True, "daily_limit": True,
+                        "resets_in_sec": float(ra),
+                        "sleep_sec": 0,
+                    })
+                    return None, 0.0
             else:
                 sleep_sec = min(2 ** attempt * 2, 30)
             append_jsonl(drive_logs / "events.jsonl", {
