@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.36 |[Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.37 |[Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,10 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.37 -- fix _persist_ra threshold to use actual short reset times
+
+- **Fix:** `_handle_rate_limit_backoff` in `consciousness.py` changed the `_persist_ra` threshold from `_ra > 1800` to `_ra > 0`. Previously, if `extract_retry_after()` returned a short but valid reset time (e.g., 600s for "resets 6am UTC" at 5:50am), the condition `_ra > 1800` was false and the system persisted the 28800s (8h) fallback to `state.json` instead of the actual 600s reset time. This caused `_check_rate_limit_window()` to block evolution for up to 8 hours after the real rate limit had already reset, preventing self-improvement cycles from resuming promptly.
 
 ### v7.1.33 -- fix consciousness rate limit window detection for unparseable reset times
 

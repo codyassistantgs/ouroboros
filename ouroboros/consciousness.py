@@ -354,7 +354,7 @@ class BackgroundConsciousness:
         # Always persist for daily limits — use actual reset time if available,
         # otherwise fall back to 8h default (same as consciousness sleep interval).
         if _is_daily:
-            _persist_ra = float(_ra) if (_ra is not None and _ra > 1800) else 28800.0
+            _persist_ra = float(_ra) if (_ra is not None and _ra > 0) else 28800.0
             try:
                 import datetime as _dt_rl
                 from supervisor.state import load_state, save_state
