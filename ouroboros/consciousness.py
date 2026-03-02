@@ -30,7 +30,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl, clip_text,
     truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
-    is_rate_limit_error, is_daily_limit_error,
+    is_rate_limit_error, is_daily_limit_error, is_transient_server_error,
 )
 from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
 
@@ -487,6 +487,21 @@ class BackgroundConsciousness:
             error_str = repr(e)
             if is_rate_limit_error(e):
                 self._handle_rate_limit_backoff(e, error_str)
+                return  # Don't fall through to consciousness_llm_error below
+            elif is_transient_server_error(e):
+                # Transient 5xx/gateway error (e.g. 504 Claude CLI timeout) —
+                # apply modest backoff (double interval, cap at 10 min) then log.
+                self._next_wakeup_sec = min(self._next_wakeup_sec * 2, 600)
+                log.warning(
+                    "consciousness: transient server error (5xx/gateway), "
+                    "backing off %.0fs: %s", self._next_wakeup_sec, error_str[:200]
+                )
+                append_jsonl(self._drive_root / "logs" / "events.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "consciousness_transient_error",
+                    "error": error_str,
+                    "next_wakeup_sec": self._next_wakeup_sec,
+                })
                 return  # Don't fall through to consciousness_llm_error below
             # Google model unavailable (GOOGLE_API_KEY not configured in proxy/env):
             # Switch to a guaranteed non-Google model permanently for this session so the

@@ -23,11 +23,9 @@ from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.pricing import get_pricing as _get_pricing, PROXY_MODEL_ALIASES as _PROXY_MODEL_ALIASES, estimate_cost as _estimate_cost_fn
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens, extract_retry_after, is_rate_limit_error, is_daily_limit_error, persist_daily_rate_limit_reset
+from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens, extract_retry_after, is_rate_limit_error, is_daily_limit_error, is_transient_server_error, persist_daily_rate_limit_reset
 
 log = logging.getLogger(__name__)
-
-# Pricing helpers live in ouroboros.pricing — imported above as _get_pricing, _PROXY_MODEL_ALIASES, _estimate_cost_fn.
 
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
@@ -267,11 +265,7 @@ def _handle_tool_calls(
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
 ) -> int:
-    """
-    Execute tool calls and append results to messages.
-
-    Returns: Number of errors encountered
-    """
+    """Execute tool calls, append results to messages; returns error count."""
     # Parallelize only for a strict read-only whitelist; all calls wrapped with timeout.
     can_parallel = (
         len(tool_calls) > 1 and
@@ -316,11 +310,7 @@ def _handle_text_response(
     llm_trace: Dict[str, Any],
     accumulated_usage: Dict[str, Any],
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    """
-    Handle LLM response without tool calls (final response).
-
-    Returns: (final_text, accumulated_usage, llm_trace)
-    """
+    """Handle final LLM text response (no tool calls); returns (text, usage, trace)."""
     if content and content.strip():
         llm_trace["assistant_notes"].append(content.strip()[:320])
     return (content or ""), accumulated_usage, llm_trace
@@ -341,13 +331,7 @@ def _check_budget_limits(
     llm_trace: Dict[str, Any],
     task_type: str = "task",
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-    """
-    Check budget limits and handle budget overrun.
-
-    Returns:
-        None if budget is OK (continue loop)
-        (final_text, accumulated_usage, llm_trace) if budget exceeded (stop loop)
-    """
+    """Check budget limits; returns None to continue or (text, usage, trace) to stop."""
     if budget_remaining_usd is None:
         return None
 
@@ -769,17 +753,7 @@ def _emit_llm_usage_event(
     cost: float,
     category: str = "task",
 ) -> None:
-    """
-    Emit llm_usage event to the event queue.
-
-    Args:
-        event_queue: Queue to emit events to (may be None)
-        task_id: Task ID for the event
-        model: Model name used for the LLM call
-        usage: Usage dict from LLM response
-        cost: Calculated cost for this call
-        category: Budget category (task, evolution, consciousness, review, summarize, other)
-    """
+    """Emit llm_usage event with token/cost breakdown to the event queue (no-op if None)."""
     if not event_queue:
         return
     try:
@@ -893,38 +867,33 @@ def _call_llm_with_retry(
         except Exception as e:
             last_error = e
             rl = is_rate_limit_error(e)
-            # Rate limits: respect Retry-After header, else exp backoff up to 3600s
-            # Non-rate-limit: fast backoff (2s, 4s) — IMPROVE.md lesson #4
+            tse = is_transient_server_error(e)
             if rl:
                 ra = extract_retry_after(e)
                 daily = is_daily_limit_error(e)
                 sleep_sec = min(float(ra) + 1.0, 3600.0) if ra is not None else min(30 * (4 ** attempt), 3600.0)
-                # Daily limit: fail fast — reset > 30min away OR daily-quota phrase
-                # detected ("hit your limit") even when reset is imminent.
                 if (ra is not None and float(ra) > 1800) or daily:
                     resets_in_sec = float(ra) if ra is not None else 28800.0
-                    log.warning(
-                        "Daily rate limit hit, resets in %.0fs — failing fast, no retries",
-                        resets_in_sec,
-                    )
+                    log.warning("Daily rate limit hit, resets in %.0fs — failing fast", resets_in_sec)
                     append_jsonl(drive_logs / "events.jsonl", {
                         "ts": utc_now_iso(), "type": "llm_api_error",
                         "task_id": task_id, "round": round_idx, "attempt": attempt + 1,
                         "model": model, "error": repr(e),
                         "is_rate_limit": True, "daily_limit": True,
-                        "resets_in_sec": resets_in_sec,
-                        "sleep_sec": 0,
+                        "resets_in_sec": resets_in_sec, "sleep_sec": 0,
                     })
-                    # Signal rate limit info to caller via accumulated_usage so
-                    # run_llm_loop can produce a specific "paused: rate limit" message
-                    # instead of the generic "empty response" text.
-                    _resets_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=resets_in_sec)
-                    _resets_at_iso = _resets_at.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    accumulated_usage["daily_rate_limit"] = True
-                    accumulated_usage["rate_limit_resets_in_sec"] = resets_in_sec
-                    accumulated_usage["rate_limit_resets_at_utc"] = _resets_at_iso
-                    persist_daily_rate_limit_reset(drive_logs.parent, task_id, _resets_at_iso)
+                    _resets_at_iso = persist_daily_rate_limit_reset(drive_logs.parent, task_id, resets_in_sec)
+                    accumulated_usage.update({"daily_rate_limit": True,
+                                              "rate_limit_resets_in_sec": resets_in_sec,
+                                              "rate_limit_resets_at_utc": _resets_at_iso})
                     return None, 0.0
+            elif tse:
+                # Transient 5xx/gateway error — longer delays than generic errors,
+                # but shorter than rate limits. 5, 10, 20 seconds.
+                sleep_sec = min(5 * (2 ** attempt), 60)
+                log.warning("Transient server error (5xx/gateway), attempt %d/%d, sleeping %.0fs: %s",
+                            attempt + 1, max_retries, sleep_sec if attempt < max_retries - 1 else 0,
+                            repr(e)[:200])
             else:
                 sleep_sec = min(2 ** attempt * 2, 30)
             append_jsonl(drive_logs / "events.jsonl", {
@@ -932,6 +901,7 @@ def _call_llm_with_retry(
                 "task_id": task_id, "round": round_idx, "attempt": attempt + 1,
                 "model": model, "error": repr(e),
                 "is_rate_limit": rl,
+                "is_transient_server_error": tse,
                 "sleep_sec": sleep_sec if attempt < max_retries - 1 else 0,
             })
             if attempt < max_retries - 1:
@@ -948,18 +918,7 @@ def _process_tool_results(
     llm_trace: Dict[str, Any],
     emit_progress: Callable[[str], None],
 ) -> int:
-    """
-    Process tool execution results and append to messages/trace.
-
-    Args:
-        results: List of tool execution result dicts
-        messages: Message list to append tool results to
-        llm_trace: Trace dict to append tool call info to
-        emit_progress: Callback for progress updates
-
-    Returns:
-        Number of errors encountered
-    """
+    """Process tool results, append to messages and trace; returns error count."""
     error_count = 0
 
     for exec_result in results:

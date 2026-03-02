@@ -308,13 +308,13 @@ def _build_health_invariants(env: Any) -> str:
     return "## Health Invariants\n\n" + "\n".join(f"- {c}" for c in checks)
 
 
-# Event types that are external/infra errors, not fixable code bugs.
+# Event types / keywords that are infra errors, not fixable code bugs — skip as evolution targets.
 _EVOLUTION_SKIP_EVENT_TYPES = frozenset({
     "consciousness_rate_limit", "llm_empty_response", "consciousness_llm_error",
 })
-# Keywords indicating rate-limit/infra errors (matched against event fields + assembled string).
 _RATE_LIMIT_KEYWORDS = ("ratelimit", "ratelimiterror", "rate limit", "429",
                         "hit your limit", "too many requests", "quota exceeded")
+_TRANSIENT_SERVER_KEYWORDS = ("504", "502", "claude cli timeout", "gateway timeout", "bad gateway")
 
 
 def _find_specific_evolution_target(env: Any, repo_dir: str) -> str:
@@ -347,6 +347,8 @@ def _find_specific_evolution_target(env: Any, repo_dir: str) -> str:
                         continue
                     if ev.get("is_rate_limit") or ev.get("daily_limit"):
                         continue
+                    if ev.get("is_transient_server_error"):
+                        continue
                     detail = (
                         ev.get("error") or ev.get("message") or
                         ev.get("result") or ev.get("text") or ""
@@ -355,14 +357,17 @@ def _find_specific_evolution_target(env: Any, repo_dir: str) -> str:
                         continue
                     if any(kw in str(detail).lower() for kw in _RATE_LIMIT_KEYWORDS):
                         continue
+                    if any(kw in str(detail).lower() for kw in _TRANSIENT_SERVER_KEYWORDS):
+                        continue
                     errors.append(f"{ev_type}: {str(detail)[:200]}")
                 except (json.JSONDecodeError, Exception):
                     continue
     except Exception:
         pass
 
-    # Safety net: drop errors still containing rate-limit keywords (old event formats).
+    # Safety net: drop errors still containing rate-limit or transient-server keywords (old formats).
     errors = [e for e in errors if not any(kw in e.lower() for kw in _RATE_LIMIT_KEYWORDS)]
+    errors = [e for e in errors if not any(kw in e.lower() for kw in _TRANSIENT_SERVER_KEYWORDS)]
 
     if errors:
         return f"Fix recent error — {errors[-1]}"

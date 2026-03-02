@@ -487,20 +487,15 @@ _DAILY_LIMIT_PHRASES = (
 def persist_daily_rate_limit_reset(
     drive_root: pathlib.Path,
     task_id: str,
-    resets_at_iso: str,
-) -> None:
-    """Persist daily rate-limit reset time to state.json for cross-restart window detection.
+    resets_in_sec: float,
+) -> str:
+    """Persist daily rate-limit reset time to state.json; returns ISO reset timestamp.
 
-    When ouroboros restarts during a multi-day rate-limit window (e.g. "resets Mar 6, 3am UTC"),
-    the events.jsonl history is fresh and the old rate-limit event is gone.  Writing the
-    reset time to state.json ensures _check_rate_limit_window() suppresses evolution tasks
-    until after the actual reset, surviving container restarts.
-
-    Args:
-        drive_root: Root data directory (parent of state/, logs/, etc.)
-        task_id: Task identifier for log messages (debugging only)
-        resets_at_iso: ISO 8601 UTC reset time, e.g. "2026-03-06T03:00:00Z"
+    Writes ``daily_rate_limit_reset_at_utc`` so container restarts during a
+    multi-day window don't lose the rate-limit knowledge and re-queue evolution.
     """
+    resets_at = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=resets_in_sec)
+    resets_at_iso = resets_at.strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         state_path = drive_root / "state" / "state.json"
         state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -517,6 +512,29 @@ def persist_daily_rate_limit_reset(
         log.info("Persisted daily rate limit reset %s to state.json (task %s)", resets_at_iso, task_id)
     except Exception:
         log.debug("Failed to persist daily rate limit reset to state.json", exc_info=True)
+    return resets_at_iso
+
+
+def is_transient_server_error(exc: Exception) -> bool:
+    """Return True if the exception is a transient 5xx server/gateway error.
+
+    Detects proxy and upstream timeout errors (504) or bad gateway (502) responses.
+    These are temporary infrastructure problems that warrant retry with longer delays,
+    but should NOT be treated as rate limits or returned as evolution targets.
+
+    Examples:
+    - InternalServerError("Error code: 504 - {'detail': 'Claude CLI timeout'}")
+    - InternalServerError("Error code: 502 - {'detail': 'Bad Gateway'}")
+    """
+    error_str = repr(exc)
+    error_lower = error_str.lower()
+    return (
+        "504" in error_str
+        or "502" in error_str
+        or "claude cli timeout" in error_lower
+        or "gateway timeout" in error_lower
+        or "bad gateway" in error_lower
+    )
 
 
 def is_daily_limit_error(exc: Exception) -> bool:
