@@ -320,9 +320,12 @@ class BackgroundConsciousness:
         from ouroboros.utils import extract_retry_after as _extract_ra
         _ra = _extract_ra(e)
         if _ra is not None and _ra > 0:
-            # Sleep until actual reset time + 60s buffer (cap 24h).
-            self._next_wakeup_sec = min(float(_ra) + 60.0, 86400.0)
-            log.info("consciousness: rate limit, sleeping %.0fs until reset", self._next_wakeup_sec)
+            # Sleep until actual reset time + 60s buffer.
+            # Cap at 7 days to handle multi-day rate limits (e.g. "resets Mar 6, 3am UTC")
+            # without waking up every 24h just to hit the same rate limit again.
+            self._next_wakeup_sec = min(float(_ra) + 60.0, 604800.0)
+            log.info("consciousness: rate limit, sleeping %.0fs (%.1fh) until reset",
+                     self._next_wakeup_sec, self._next_wakeup_sec / 3600)
         elif is_daily_limit_error(e):
             # Daily quota exhausted, reset time not parseable — conservative 8h fallback.
             self._next_wakeup_sec = 28800.0

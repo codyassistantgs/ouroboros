@@ -245,11 +245,12 @@ class TestRateLimitBackoff:
             )
 
     def test_rate_limit_backoff_cap_is_24h(self):
-        """Daily rate limit (ra > 14400s) sleeps up to 24h, not just 4h.
+        """Daily rate limit (ra > 14400s) sleeps the full duration, not just 4h.
 
         Previous cap was 14400s (4h), which caused the consciousness to retry
         4+ times before the reset, logging a spurious error each time.
-        The new cap is 86400s (24h) so it waits out the full daily reset.
+        The cap is now 7 days (604800s) so multi-day resets don't cause repeated
+        wakeups. For a 16h reset the wakeup is 57660s (well within the 7-day cap).
         """
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = pathlib.Path(tmp)
@@ -268,11 +269,48 @@ class TestRateLimitBackoff:
             with patch("ouroboros.utils.extract_retry_after", return_value=57600.0):
                 bc._think()
 
-            # next_wakeup_sec should be 57600 + 60 = 57660 (< 86400 cap)
+            # next_wakeup_sec should be 57600 + 60 = 57660 (< 604800 7-day cap)
             # NOT the old cap of 14400
             assert bc._next_wakeup_sec > 14400, (
                 f"With a 16h reset, wakeup should be >14400s, got {bc._next_wakeup_sec}"
             )
-            assert bc._next_wakeup_sec <= 86400, (
-                f"Wakeup should not exceed 86400s cap, got {bc._next_wakeup_sec}"
+            assert bc._next_wakeup_sec <= 604800, (
+                f"Wakeup should not exceed 604800s (7-day) cap, got {bc._next_wakeup_sec}"
+            )
+
+    def test_multiday_rate_limit_sleeps_until_actual_reset(self):
+        """Multi-day rate limit (e.g. 'resets Mar 6, 3am UTC' when today is Mar 2)
+        should sleep until the actual reset, NOT be capped at 24h.
+
+        The previous 86400s (24h) cap meant consciousness woke up every day during a
+        multi-day window, hit the same rate limit, and generated 4 spurious wakeups.
+        With the new 604800s (7-day) cap, it sleeps until the actual reset time.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            bc = _make_consciousness(tmp_path)
+
+            rate_limit_err = Exception("RateLimitError('429 - rate limit')")
+            bc._llm.chat = MagicMock(side_effect=rate_limit_err)
+            bc._build_context = MagicMock(return_value="context")
+            bc._tool_schemas = MagicMock(return_value=[])
+            bc._maybe_schedule_arch_review = MagicMock()
+
+            # Simulate: "resets Mar 6, 3am (UTC)" when current time is Mar 2 → ~4 days
+            # extract_retry_after returns ~345600s (4 days)
+            four_days_sec = 4 * 86400  # 345600
+            with patch("ouroboros.utils.extract_retry_after", return_value=float(four_days_sec)):
+                bc._think()
+
+            # next_wakeup_sec should be ~345660 (4 days + 60s buffer), NOT capped at 86400
+            expected = four_days_sec + 60
+            assert bc._next_wakeup_sec > 86400, (
+                f"4-day reset should NOT be capped at 86400s; "
+                f"expected ~{expected}s, got {bc._next_wakeup_sec}"
+            )
+            assert bc._next_wakeup_sec <= 604800, (
+                f"Wakeup should not exceed 604800s (7-day) cap, got {bc._next_wakeup_sec}"
+            )
+            assert abs(bc._next_wakeup_sec - expected) < 5, (
+                f"Wakeup should be close to {expected}s, got {bc._next_wakeup_sec}"
             )
