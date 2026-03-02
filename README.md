@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.30 |[Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.32 |[Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,12 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.32 -- extend daily rate limit fallback to cover all quota-exhaustion phrases
+
+- **Fix:** `extract_retry_after` in `utils.py` now returns the 8-hour fallback (28800s) for all daily quota phrases (`"quota exceeded"`, `"daily limit"`, `"daily quota"`, `"exceeded your"`) instead of just `"hit your limit"`. Previously, if an API returned one of these phrases without a parseable reset time, `extract_retry_after` returned `None`, causing the system to treat it as a transient limit instead of a daily quota exhaustion.
+- **Fix:** `_handle_rate_limit_backoff` in `consciousness.py` now persists the rate limit reset time to `state.json` for **all** daily limit detections, not just when `_ra > 1800`. Previously, daily limits detected via fallback phrases without a large `_ra` value were not persisted, meaning a container restart during such a window would not detect the active rate limit.
+- **Fix:** README version badge updated to match VERSION file (v7.1.31 was missing from README).
 
 ### v7.1.30 -- persist rate-limit window to state.json for cross-restart resilience
 

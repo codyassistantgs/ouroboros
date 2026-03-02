@@ -346,11 +346,14 @@ class BackgroundConsciousness:
         # Persist rate-limit reset time to state.json for cross-restart window detection.
         # Without this, a container restart during a multi-day rate limit would lose
         # the window knowledge and allow evolution to restart immediately.
-        if _is_daily and (_ra is not None and _ra > 1800):
+        # Always persist for daily limits — use actual reset time if available,
+        # otherwise fall back to 8h default (same as consciousness sleep interval).
+        if _is_daily:
+            _persist_ra = float(_ra) if (_ra is not None and _ra > 1800) else 28800.0
             try:
                 import datetime as _dt_rl
                 from supervisor.state import load_state, save_state
-                _resets_at = _dt_rl.datetime.now(_dt_rl.timezone.utc) + _dt_rl.timedelta(seconds=float(_ra))
+                _resets_at = _dt_rl.datetime.now(_dt_rl.timezone.utc) + _dt_rl.timedelta(seconds=_persist_ra)
                 _resets_at_iso = _resets_at.strftime("%Y-%m-%dT%H:%M:%SZ")
                 _st = load_state()
                 _st["daily_rate_limit_reset_at_utc"] = _resets_at_iso
