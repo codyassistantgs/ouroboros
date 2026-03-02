@@ -211,6 +211,66 @@ class TestCheckRateLimitWindow:
             result = _check_rate_limit_window(tmp_path)
         assert result is None, "Expired consciousness_rate_limit should return None"
 
+    def test_consciousness_rate_limit_daily_flag_no_retry_after_blocks(self):
+        """consciousness_rate_limit with daily_limit=True but retry_after_sec=None → blocks evolution.
+
+        Before this fix, when the rate-limit reset time couldn't be parsed (e.g., error
+        message was 'quota exceeded' without a time), the consciousness loop set
+        next_wakeup_sec=28800 but logged retry_after_sec=None.
+        _check_rate_limit_window() would then compute float(None or 0)=0.0 <= 1800 and
+        SKIP the event, potentially scheduling evolution during the active window.
+        """
+        from supervisor.queue import _check_rate_limit_window
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            # Simulate: daily limit where reset time couldn't be parsed → retry_after_sec=None
+            _write_events(tmp_path, [
+                {
+                    "ts": _ts_offset(-60),     # 1 minute ago
+                    "type": "consciousness_rate_limit",
+                    "retry_after_sec": None,   # Not parseable (None → 0 via float(None or 0))
+                    "daily_limit": True,       # But explicitly flagged as daily limit
+                    "error": "RateLimitError('429 - quota exceeded')",
+                    "next_wakeup_sec": 28800,
+                },
+            ])
+            result = _check_rate_limit_window(tmp_path)
+        assert result is not None, (
+            "consciousness_rate_limit with daily_limit=True should block evolution "
+            "even when retry_after_sec is None — uses 8h default"
+        )
+        assert result > 0, "Remaining seconds should be positive"
+        # Should be approximately 28800 - 60 = 28740 seconds remaining
+        assert 28600 < result < 28800, f"Expected ~28740s remaining, got {result:.0f}s"
+
+    def test_consciousness_rate_limit_short_with_daily_flag_blocks(self):
+        """consciousness_rate_limit with daily_limit=True and small retry_after_sec → still blocks.
+
+        Even if the reset time is close (e.g., 5 minutes away), a daily limit should
+        block evolution for the remaining window duration, not be skipped.
+        """
+        from supervisor.queue import _check_rate_limit_window
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            # Simulate: daily limit expiring in 5 minutes (300s event - 30s elapsed = 270s remaining)
+            _write_events(tmp_path, [
+                {
+                    "ts": _ts_offset(-30),     # 30 seconds ago
+                    "type": "consciousness_rate_limit",
+                    "retry_after_sec": 300,    # Only 5 minutes total → 270s remaining
+                    "daily_limit": True,       # But it's a daily limit (not transient)
+                    "error": "RateLimitError('429 - hit your limit, resets 1am UTC')",
+                },
+            ])
+            result = _check_rate_limit_window(tmp_path)
+        assert result is not None, (
+            "consciousness_rate_limit with daily_limit=True should block evolution "
+            "even when retry_after_sec <= 1800 (close to reset)"
+        )
+        assert result > 0, "Remaining seconds should be positive"
+        # Should be approximately 300 - 30 = 270 seconds remaining
+        assert 200 < result < 300, f"Expected ~270s remaining, got {result:.0f}s"
+
 
 class TestExtractRetryAfter:
     """Unit tests for extract_retry_after() in ouroboros/utils.py."""

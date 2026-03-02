@@ -449,9 +449,17 @@ def _check_rate_limit_window(drive_root: pathlib.Path) -> Optional[float]:
                     # Background consciousness logs rate limits separately.
                     # Treat as a daily limit window if retry_after_sec > 30 min,
                     # since short transient limits don't need to block evolution.
+                    # Also block when daily_limit=True even if retry_after_sec is
+                    # missing or small: old events may have retry_after_sec=None when
+                    # the reset time couldn't be parsed (the consciousness loop then
+                    # slept 8h but logged retry_after_sec=null, which float(None or 0)=0
+                    # would cause this check to skip the event and allow evolution).
                     ra = float(ev.get("retry_after_sec") or 0)
-                    if ra <= 1800:
-                        continue
+                    is_daily_flag = bool(ev.get("daily_limit"))
+                    if ra <= 1800 and not is_daily_flag:
+                        continue  # Short transient rate limit — not a daily limit
+                    if ra <= 0 and is_daily_flag:
+                        ra = 28800.0  # 8h default for daily limits with no parseable reset time
                     resets_in_sec = ra
                 else:
                     continue

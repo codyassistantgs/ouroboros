@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.32 |[Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.33 |[Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,12 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.33 -- fix consciousness rate limit window detection for unparseable reset times
+
+- **Fix:** `_handle_rate_limit_backoff` in `consciousness.py` now logs `retry_after_sec=28800.0` (the 8h fallback) instead of `None` when a daily rate limit is hit but the reset time cannot be parsed. Previously, `retry_after_sec=None` caused `_check_rate_limit_window()` in `queue.py` to compute `float(None or 0)=0 ≤ 1800` and skip the event, potentially scheduling evolution tasks during an active rate-limit window.
+- **Fix:** `_check_rate_limit_window` in `queue.py` now also blocks evolution when a `consciousness_rate_limit` event has `daily_limit=True` even if `retry_after_sec ≤ 1800`. This handles old events logged before v7.1.33's `_ra_log` fix, plus the edge case where a daily limit reset is imminent (small but non-zero remaining time).
+- **Tests:** Added 2 new test cases in `test_evolution_rate_limit.py` covering both scenarios.
 
 ### v7.1.32 -- extend daily rate limit fallback to cover all quota-exhaustion phrases
 

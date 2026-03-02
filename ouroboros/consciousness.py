@@ -333,8 +333,13 @@ class BackgroundConsciousness:
         else:
             # Transient rate limit — triple interval up to 1 hour.
             self._next_wakeup_sec = min(self._next_wakeup_sec * 3, 3600)
-        _ra_log = _ra if (_ra is not None and _ra > 0) else None
         _is_daily = is_daily_limit_error(e)
+        # When a daily limit hits but the reset time couldn't be parsed, log the
+        # fallback backoff (28800s) instead of None.  Without this, retry_after_sec=None
+        # causes _check_rate_limit_window() to see float(None or 0)=0 <= 1800 and skip
+        # the event, potentially allowing evolution to be scheduled during an active
+        # rate-limit window (the window check sees no active window and proceeds).
+        _ra_log = _ra if (_ra is not None and _ra > 0) else (28800.0 if _is_daily else None)
         append_jsonl(self._drive_root / "logs" / "events.jsonl", {
             "ts": utc_now_iso(),
             "type": "consciousness_rate_limit",
