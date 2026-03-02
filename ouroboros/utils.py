@@ -484,6 +484,41 @@ _DAILY_LIMIT_PHRASES = (
 )
 
 
+def persist_daily_rate_limit_reset(
+    drive_root: pathlib.Path,
+    task_id: str,
+    resets_at_iso: str,
+) -> None:
+    """Persist daily rate-limit reset time to state.json for cross-restart window detection.
+
+    When ouroboros restarts during a multi-day rate-limit window (e.g. "resets Mar 6, 3am UTC"),
+    the events.jsonl history is fresh and the old rate-limit event is gone.  Writing the
+    reset time to state.json ensures _check_rate_limit_window() suppresses evolution tasks
+    until after the actual reset, surviving container restarts.
+
+    Args:
+        drive_root: Root data directory (parent of state/, logs/, etc.)
+        task_id: Task identifier for log messages (debugging only)
+        resets_at_iso: ISO 8601 UTC reset time, e.g. "2026-03-06T03:00:00Z"
+    """
+    try:
+        state_path = drive_root / "state" / "state.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        st: dict = {}
+        if state_path.exists():
+            try:
+                st = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                st = {}
+        st["daily_rate_limit_reset_at_utc"] = resets_at_iso
+        tmp = state_path.with_name(f".state.json.rl.{task_id}.tmp")
+        tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(state_path))
+        log.info("Persisted daily rate limit reset %s to state.json (task %s)", resets_at_iso, task_id)
+    except Exception:
+        log.debug("Failed to persist daily rate limit reset to state.json", exc_info=True)
+
+
 def is_daily_limit_error(exc: Exception) -> bool:
     """Return True if the exception indicates a daily API quota exhaustion.
 

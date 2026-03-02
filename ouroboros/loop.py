@@ -7,6 +7,7 @@ Extracted from agent.py to keep the agent thin.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import pathlib
@@ -22,7 +23,7 @@ from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.pricing import get_pricing as _get_pricing, PROXY_MODEL_ALIASES as _PROXY_MODEL_ALIASES, estimate_cost as _estimate_cost_fn
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens, extract_retry_after, is_rate_limit_error, is_daily_limit_error
+from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens, extract_retry_after, is_rate_limit_error, is_daily_limit_error, persist_daily_rate_limit_reset
 
 log = logging.getLogger(__name__)
 
@@ -917,11 +918,12 @@ def _call_llm_with_retry(
                     # Signal rate limit info to caller via accumulated_usage so
                     # run_llm_loop can produce a specific "paused: rate limit" message
                     # instead of the generic "empty response" text.
-                    import datetime as _dt
-                    _resets_at = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=resets_in_sec)
+                    _resets_at = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=resets_in_sec)
+                    _resets_at_iso = _resets_at.strftime("%Y-%m-%dT%H:%M:%SZ")
                     accumulated_usage["daily_rate_limit"] = True
                     accumulated_usage["rate_limit_resets_in_sec"] = resets_in_sec
-                    accumulated_usage["rate_limit_resets_at_utc"] = _resets_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    accumulated_usage["rate_limit_resets_at_utc"] = _resets_at_iso
+                    persist_daily_rate_limit_reset(drive_logs.parent, task_id, _resets_at_iso)
                     return None, 0.0
             else:
                 sleep_sec = min(2 ** attempt * 2, 30)
