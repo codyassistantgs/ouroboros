@@ -121,9 +121,12 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         # API/infra error: model never ran at all (rate limit, service outage, etc.)
         # Also catches the case where round 1 ran but a later round hit a daily rate limit
         # (rounds>0, tokens>0 — the simple zero-check would miss this).
+        # Also catches 504/502 transient errors that may have fired mid-task (after some
+        # rounds succeeded), which the simple zero-check would otherwise miss.
         # Don't count these as evolution logic failures to avoid tripping circuit breaker.
         _daily_rate_limit = bool(evt.get("daily_rate_limit"))
-        _api_error = (rounds == 0 and completion_tokens == 0 and cost == 0) or _daily_rate_limit
+        _had_transient_error = bool(evt.get("had_transient_server_error"))
+        _api_error = (rounds == 0 and completion_tokens == 0 and cost == 0) or _daily_rate_limit or _had_transient_error
 
         if _evolution_committed:
             # Real success: new code committed to git
@@ -138,15 +141,17 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                 },
             )
         elif _api_error:
-            # Infrastructure failure — model unreachable (rate limit, outage).
+            # Infrastructure failure — model unreachable (rate limit, outage, or transient 5xx).
             # Don't increment consecutive_failures; circuit breaker should not trip on outages.
-            log.warning("Evolution task %s: API error (0 rounds/tokens/cost), skipping failure count", task_id)
+            _reason = "transient_server_error" if _had_transient_error else ("daily_rate_limit" if _daily_rate_limit else "zero_rounds")
+            log.warning("Evolution task %s: API/infra error (%s), skipping failure count", task_id, _reason)
             ctx.append_jsonl(
                 ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
                     "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "type": "evolution_api_error_skipped",
                     "task_id": task_id,
+                    "reason": _reason,
                 },
             )
             # Persist rate-limit reset time to state.json so _check_rate_limit_window

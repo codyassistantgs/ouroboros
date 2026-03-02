@@ -889,11 +889,17 @@ def _call_llm_with_retry(
                     return None, 0.0
             elif tse:
                 # Transient 5xx/gateway error — longer delays than generic errors,
-                # but shorter than rate limits. 5, 10, 20 seconds.
-                sleep_sec = min(5 * (2 ** attempt), 60)
+                # but shorter than rate limits. 10, 20, 40 seconds.
+                # Larger base (10s) and longer cap (120s) because "Claude CLI timeout"
+                # (504) means the proxy subprocess was killed — it needs more recovery
+                # time than a quick 5-second wait to free resources and accept the next request.
+                sleep_sec = min(10 * (2 ** attempt), 120)
                 log.warning("Transient server error (5xx/gateway), attempt %d/%d, sleeping %.0fs: %s",
                             attempt + 1, max_retries, sleep_sec if attempt < max_retries - 1 else 0,
                             repr(e)[:200])
+                # Mark accumulated_usage so circuit breaker is not tripped even if some
+                # rounds already succeeded before the transient error hit.
+                accumulated_usage["had_transient_server_error"] = True
             else:
                 sleep_sec = min(2 ** attempt * 2, 30)
             append_jsonl(drive_logs / "events.jsonl", {

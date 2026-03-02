@@ -535,6 +535,10 @@ class OuroborosAgent:
             # Propagate reset time so supervisor can persist it to state.json
             # for cross-restart rate-limit window detection.
             "rate_limit_resets_at_utc": usage.get("rate_limit_resets_at_utc") or "",
+            # Propagate transient server error flag (504/502) so the circuit breaker
+            # is not incremented even when some rounds already succeeded before the
+            # error hit (rounds>0 means _api_error=False without this flag).
+            "had_transient_server_error": bool(usage.get("had_transient_server_error")),
             "ts": utc_now_iso(),
         })
         append_jsonl(drive_logs / "events.jsonl", {
