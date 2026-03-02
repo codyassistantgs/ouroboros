@@ -30,6 +30,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ouroboros.utils import (
     utc_now_iso, read_text, append_jsonl, clip_text,
     truncate_for_log, sanitize_tool_result_for_log, sanitize_tool_args_for_log,
+    is_rate_limit_error, is_daily_limit_error,
 )
 from ouroboros.llm import LLMClient, DEFAULT_LIGHT_MODEL
 
@@ -314,6 +315,31 @@ class BackgroundConsciousness:
     # Think cycle
     # -------------------------------------------------------------------
 
+    def _handle_rate_limit_backoff(self, e: Exception, error_str: str) -> None:
+        """Compute and apply wakeup backoff for a rate-limit error, then log it."""
+        from ouroboros.utils import extract_retry_after as _extract_ra
+        _ra = _extract_ra(e)
+        if _ra is not None and _ra > 0:
+            # Sleep until actual reset time + 60s buffer (cap 24h).
+            self._next_wakeup_sec = min(float(_ra) + 60.0, 86400.0)
+            log.info("consciousness: rate limit, sleeping %.0fs until reset", self._next_wakeup_sec)
+        elif is_daily_limit_error(e):
+            # Daily quota exhausted, reset time not parseable — conservative 8h fallback.
+            self._next_wakeup_sec = 28800.0
+            log.info("consciousness: daily rate limit (no parseable reset time), sleeping 8h")
+        else:
+            # Transient rate limit — triple interval up to 1 hour.
+            self._next_wakeup_sec = min(self._next_wakeup_sec * 3, 3600)
+        _ra_log = _ra if (_ra is not None and _ra > 0) else None
+        append_jsonl(self._drive_root / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "consciousness_rate_limit",
+            "error": error_str,
+            "next_wakeup_sec": self._next_wakeup_sec,
+            "retry_after_sec": _ra_log,
+            "daily_limit": is_daily_limit_error(e),
+        })
+
     def _think(self, _retry_attempt: int = 0) -> None:
         """One thinking cycle: build context, call LLM, execute tools iteratively.
 
@@ -432,27 +458,8 @@ class BackgroundConsciousness:
 
         except Exception as e:
             error_str = repr(e)
-            # Rate limit: back off using actual reset time when available, else triple interval
-            if "429" in error_str or "RateLimit" in error_str or "rate limit" in error_str.lower():
-                from ouroboros.utils import extract_retry_after as _extract_ra
-                _ra = _extract_ra(e)
-                if _ra is not None and _ra > 0:
-                    # Sleep until actual reset time + 60s buffer.
-                    # Cap at 86400s (24h) — handles daily limits that reset 8-16h away
-                    # without waking up 4+ times and hitting the limit again each time.
-                    self._next_wakeup_sec = min(float(_ra) + 60.0, 86400.0)
-                    log.info("consciousness: rate limit, sleeping %.0fs until reset", self._next_wakeup_sec)
-                else:
-                    self._next_wakeup_sec = min(self._next_wakeup_sec * 3, 3600)
-                # Log rate limits under a distinct event type so they're easy to
-                # distinguish from real logic errors in monitoring/dashboards.
-                append_jsonl(self._drive_root / "logs" / "events.jsonl", {
-                    "ts": utc_now_iso(),
-                    "type": "consciousness_rate_limit",
-                    "error": error_str,
-                    "next_wakeup_sec": self._next_wakeup_sec,
-                    "retry_after_sec": _ra,
-                })
+            if is_rate_limit_error(e):
+                self._handle_rate_limit_backoff(e, error_str)
                 return  # Don't fall through to consciousness_llm_error below
             # Google model unavailable (GOOGLE_API_KEY not configured in proxy/env):
             # Switch to a guaranteed non-Google model permanently for this session so the

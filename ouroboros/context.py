@@ -308,12 +308,13 @@ def _build_health_invariants(env: Any) -> str:
     return "## Health Invariants\n\n" + "\n".join(f"- {c}" for c in checks)
 
 
-
 # Event types that are external/infra errors, not fixable code bugs.
-_EVOLUTION_SKIP_EVENT_TYPES = frozenset({"consciousness_rate_limit", "llm_empty_response"})
-# Keywords in error detail that indicate a transient rate-limit, not a code bug.
-_RATE_LIMIT_KEYWORDS = ("ratelimit", "rate limit", "429", "hit your limit",
-                        "too many requests", "quota exceeded")
+_EVOLUTION_SKIP_EVENT_TYPES = frozenset({
+    "consciousness_rate_limit", "llm_empty_response", "consciousness_llm_error",
+})
+# Keywords indicating rate-limit/infra errors (matched against event fields + assembled string).
+_RATE_LIMIT_KEYWORDS = ("ratelimit", "ratelimiterror", "rate limit", "429",
+                        "hit your limit", "too many requests", "quota exceeded")
 
 
 def _find_specific_evolution_target(env: Any, repo_dir: str) -> str:
@@ -323,14 +324,14 @@ def _find_specific_evolution_target(env: Any, repo_dir: str) -> str:
     fall back to IMPROVE.md.  Rate-limit/infra errors are excluded — they are
     external API constraints, not code bugs.
     """
-    # 1. Scan last 100 lines of events.jsonl for tool_error / failed events
+    # 1. Scan last 200 lines of events.jsonl for tool_error / failed events
     events_path = env.drive_path("logs/events.jsonl")
     errors: list = []
     try:
         if events_path.exists():
             import subprocess as _sp_ev
             _tail = _sp_ev.run(
-                ["tail", "-n", "100", str(events_path)],
+                ["tail", "-n", "200", str(events_path)],
                 capture_output=True, text=True, timeout=10,
             )
             for line in (_tail.stdout or "").splitlines():
@@ -359,6 +360,9 @@ def _find_specific_evolution_target(env: Any, repo_dir: str) -> str:
                     continue
     except Exception:
         pass
+
+    # Safety net: drop errors still containing rate-limit keywords (old event formats).
+    errors = [e for e in errors if not any(kw in e.lower() for kw in _RATE_LIMIT_KEYWORDS)]
 
     if errors:
         return f"Fix recent error — {errors[-1]}"

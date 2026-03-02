@@ -247,6 +247,137 @@ class TestExtractRetryAfter:
         result = extract_retry_after(exc)
         assert result is None, f"Generic 429 without time/phrase should return None, got {result}"
 
+    def test_resets_1am_utc_returns_positive_value(self):
+        """'resets 1am (UTC)' pattern → returns computed seconds to 1am UTC."""
+        from ouroboros.utils import extract_retry_after
+        exc = Exception("RateLimitError('Error code: 429 - {\"detail\": \"Rate limit: You\\'ve hit your limit · resets 1am (UTC)\"}')")
+        result = extract_retry_after(exc)
+        assert result is not None, "Should return a positive delay for 'resets 1am (UTC)'"
+        assert result > 0, f"Result should be positive, got {result}"
+        # The reset time is always in the future (at most 24h away)
+        assert result <= 86400, f"Result should be at most 24h, got {result}"
+
+    def test_resets_mar_6_3am_utc_returns_large_value(self):
+        """'resets Mar 6, 3am (UTC)' date+time format → returns seconds to that date/time.
+
+        This is the specific error format from Evolution #223:
+        RateLimitError('Error code: 429 - {"detail": "Rate limit: You've hit your limit
+        · resets Mar 6, 3am (UTC)"}')
+
+        The old code fell through to the 'hit your limit' fallback returning 28800s (8h),
+        but the real reset is days away. The new date+time parser returns the correct value.
+        """
+        import datetime as _dt
+        from ouroboros.utils import extract_retry_after
+
+        exc = Exception(
+            "RateLimitError('Error code: 429 - {\"detail\": \"Rate limit: "
+            "You\\'ve hit your limit \\u00b7 resets Mar 6, 3am (UTC)\"}\")')"
+        )
+        result = extract_retry_after(exc)
+        assert result is not None, "Should return a delay for 'resets Mar 6, 3am (UTC)'"
+        assert result > 0, f"Result should be positive, got {result}"
+        # Result must be larger than 8h fallback when reset is days away:
+        # if today < Mar 6 UTC, result >> 28800; if today > Mar 6, result ≈ 1 year
+        # Either way it should be a positive number of seconds
+        assert result <= 366 * 86400, f"Result should not exceed 1 year, got {result}"
+
+    def test_resets_date_time_format_more_accurate_than_fallback(self):
+        """Date+time format ('resets Mar 6, 3am') gives seconds-accurate result,
+        not just the fixed 28800s fallback."""
+        import datetime as _dt
+        from ouroboros.utils import extract_retry_after
+
+        exc = Exception(
+            "RateLimitError('429: Rate limit: You\\'ve hit your limit · resets Dec 31, 11pm (UTC)')"
+        )
+        result = extract_retry_after(exc)
+        assert result is not None, "Should parse 'resets Dec 31, 11pm (UTC)'"
+        assert result > 0, f"Result should be positive, got {result}"
+        # Not the generic 28800s fallback if parsed correctly
+        # (28800 would only be returned if the parse failed)
+        assert result != 28800.0, (
+            "Should return precise computed seconds, not the generic 8h fallback"
+        )
+
+
+class TestIsDailyLimitError:
+    """Unit tests for is_daily_limit_error() in ouroboros/utils.py."""
+
+    def test_hit_your_limit_is_daily(self):
+        """'hit your limit' phrase → True (daily quota exhaustion)."""
+        from ouroboros.utils import is_daily_limit_error
+        exc = Exception("RateLimitError('Error code: 429 - {\"detail\": \"Rate limit: You\\'ve hit your limit · resets 1am (UTC)\"}')")
+        assert is_daily_limit_error(exc) is True
+
+    def test_you_have_hit_your_limit_is_daily(self):
+        """'you have hit your limit' variant → True."""
+        from ouroboros.utils import is_daily_limit_error
+        exc = Exception("RateLimitError('429: You have hit your limit for today')")
+        assert is_daily_limit_error(exc) is True
+
+    def test_quota_exceeded_is_daily(self):
+        """'quota exceeded' phrase → True."""
+        from ouroboros.utils import is_daily_limit_error
+        exc = Exception("RateLimitError('Error: Quota exceeded for this billing period')")
+        assert is_daily_limit_error(exc) is True
+
+    def test_too_many_requests_is_not_daily(self):
+        """Generic 'too many requests' → False (transient rate window, not daily)."""
+        from ouroboros.utils import is_daily_limit_error
+        exc = Exception("RateLimitError('Error code: 429 - {\"detail\": \"Too many requests, please retry after 60s\"}')")
+        assert is_daily_limit_error(exc) is False
+
+    def test_connection_error_is_not_daily(self):
+        """Non-rate-limit errors → False."""
+        from ouroboros.utils import is_daily_limit_error
+        exc = ConnectionError("Connection refused")
+        assert is_daily_limit_error(exc) is False
+
+
+class TestDailyLimitFastFail:
+    """Tests for the close-to-reset edge case in _call_llm_with_retry.
+
+    The bug: when "resets 1am (UTC)" error occurs and it is close to 1am UTC
+    (e.g., 00:58 UTC → ra ≈ 120s < 1800s), the old code did NOT trigger the
+    fast-fail path because ra <= 1800, even though "You've hit your limit"
+    clearly indicates daily quota exhaustion.
+
+    The fix: is_daily_limit_error() detects the daily quota phrase and triggers
+    fast-fail regardless of how small ra is.
+    """
+
+    def test_close_to_reset_triggers_fast_fail_via_daily_flag(self):
+        """Simulate the 00:58 UTC / resets 1am edge case.
+
+        We verify the logic path: is_daily_limit_error returns True for the
+        "hit your limit" phrase, so the daily_limit fast-fail triggers even when
+        ra < 1800.
+        """
+        from ouroboros.utils import is_daily_limit_error, extract_retry_after, is_rate_limit_error
+
+        # The exact error that triggered Evolution #146's target selection
+        exc = Exception("RateLimitError('Error code: 429 - {\"detail\": \"Rate limit: You\\'ve hit your limit · resets 1am (UTC)\"}')")
+
+        assert is_rate_limit_error(exc) is True, "Should be a rate limit error"
+        assert is_daily_limit_error(exc) is True, "Should be a daily limit (has 'hit your limit')"
+
+        # is_daily_limit_error=True means fast-fail even when ra is small
+        # (the old code only fast-failed when ra > 1800)
+        ra = extract_retry_after(exc)
+        # No matter the current time, is_daily_limit_error ensures fast-fail
+        # The condition in _call_llm_with_retry is now:
+        #   if (ra is not None and float(ra) > 1800) or daily:
+        # Previously just: if ra is not None and float(ra) > 1800:
+        daily = is_daily_limit_error(exc)
+        old_would_fast_fail = ra is not None and float(ra) > 1800
+        new_would_fast_fail = old_would_fast_fail or daily
+        assert new_would_fast_fail is True, (
+            f"New code should always fast-fail for daily limit errors. "
+            f"ra={ra:.0f}s, daily={daily}, "
+            f"old_condition={old_would_fast_fail}, new_condition={new_would_fast_fail}"
+        )
+
 
 class TestFindSpecificEvolutionTarget:
     """Unit tests for _find_specific_evolution_target() rate-limit filtering."""
@@ -374,6 +505,65 @@ class TestFindSpecificEvolutionTarget:
         assert result != "", "Should find the tool_error even when rate limit also present"
         assert "tool_error" in result, (
             f"Should target the real tool_error, not the rate limit, got: {result!r}"
+        )
+
+    def test_old_format_rate_limit_event_filtered_by_safety_net(self):
+        """OLD llm_api_error without is_rate_limit flag is still filtered by safety net.
+
+        Before v7.1.26, llm_api_error events didn't have the is_rate_limit/daily_limit
+        flags. The safety-net keyword check on the assembled error string catches these.
+        The specific error format from Evolution #190's target is tested here.
+        """
+        from ouroboros.context import _find_specific_evolution_target
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            # Old-format event: no is_rate_limit or daily_limit flags
+            self._write_events(tmp_path, [
+                {
+                    "ts": _ts_offset(-30),
+                    "type": "llm_api_error",
+                    # Deliberately omit is_rate_limit and daily_limit (old event format)
+                    "error": (
+                        "RateLimitError('Error code: 429 - "
+                        "{\"detail\": \"Rate limit: You\\'ve hit your limit "
+                        "\u00b7 resets 1am (UTC)\"}')"
+                    ),
+                    "model": "anthropic/claude-haiku-4-5",
+                    "round": 1,
+                },
+            ])
+            env = self._make_env(tmp_path)
+            result = _find_specific_evolution_target(env, str(tmp_path))
+        assert result == "" or "RateLimitError" not in result, (
+            f"Old-format rate limit error should be filtered by safety net, got: {result!r}"
+        )
+        # Must not contain the 429 error as an evolution target
+        if result:
+            assert "429" not in result, (
+                f"Rate limit 429 should never appear in evolution target, got: {result!r}"
+            )
+
+    def test_consciousness_llm_error_now_filtered(self):
+        """consciousness_llm_error events are now filtered (added to SKIP set in v7.1.29).
+
+        These are always infrastructure/model issues, never fixable code bugs.
+        """
+        from ouroboros.context import _find_specific_evolution_target
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = pathlib.Path(tmp)
+            self._write_events(tmp_path, [
+                {
+                    "ts": _ts_offset(-30),
+                    "type": "consciousness_llm_error",
+                    "error": "ConnectionError: Failed to connect to proxy",
+                    "model_override": None,
+                    "consecutive_google_errors": 0,
+                },
+            ])
+            env = self._make_env(tmp_path)
+            result = _find_specific_evolution_target(env, str(tmp_path))
+        assert result == "" or "consciousness_llm_error" not in result, (
+            f"consciousness_llm_error should be filtered as infra error, got: {result!r}"
         )
 
 

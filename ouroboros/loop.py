@@ -22,7 +22,7 @@ from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.pricing import get_pricing as _get_pricing, PROXY_MODEL_ALIASES as _PROXY_MODEL_ALIASES, estimate_cost as _estimate_cost_fn
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens, extract_retry_after, is_rate_limit_error
+from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens, extract_retry_after, is_rate_limit_error, is_daily_limit_error
 
 log = logging.getLogger(__name__)
 
@@ -896,28 +896,31 @@ def _call_llm_with_retry(
             # Non-rate-limit: fast backoff (2s, 4s) — IMPROVE.md lesson #4
             if rl:
                 ra = extract_retry_after(e)
+                daily = is_daily_limit_error(e)
                 sleep_sec = min(float(ra) + 1.0, 3600.0) if ra is not None else min(30 * (4 ** attempt), 3600.0)
-                # Daily rate limit (resets hours away): fail immediately to avoid blocking worker
-                if ra is not None and float(ra) > 1800:
+                # Daily limit: fail fast — reset > 30min away OR daily-quota phrase
+                # detected ("hit your limit") even when reset is imminent.
+                if (ra is not None and float(ra) > 1800) or daily:
+                    resets_in_sec = float(ra) if ra is not None else 28800.0
                     log.warning(
-                        "Daily rate limit hit, resets in %.0fs (>30min) — failing fast, no retries",
-                        float(ra),
+                        "Daily rate limit hit, resets in %.0fs — failing fast, no retries",
+                        resets_in_sec,
                     )
                     append_jsonl(drive_logs / "events.jsonl", {
                         "ts": utc_now_iso(), "type": "llm_api_error",
                         "task_id": task_id, "round": round_idx, "attempt": attempt + 1,
                         "model": model, "error": repr(e),
                         "is_rate_limit": True, "daily_limit": True,
-                        "resets_in_sec": float(ra),
+                        "resets_in_sec": resets_in_sec,
                         "sleep_sec": 0,
                     })
                     # Signal rate limit info to caller via accumulated_usage so
                     # run_llm_loop can produce a specific "paused: rate limit" message
                     # instead of the generic "empty response" text.
                     import datetime as _dt
-                    _resets_at = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=float(ra))
+                    _resets_at = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=resets_in_sec)
                     accumulated_usage["daily_rate_limit"] = True
-                    accumulated_usage["rate_limit_resets_in_sec"] = float(ra)
+                    accumulated_usage["rate_limit_resets_in_sec"] = resets_in_sec
                     accumulated_usage["rate_limit_resets_at_utc"] = _resets_at.strftime("%Y-%m-%dT%H:%M:%SZ")
                     return None, 0.0
             else:

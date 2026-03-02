@@ -405,6 +405,38 @@ def extract_retry_after(exc: Exception) -> Optional[float]:
         except (ValueError, TypeError):
             pass
 
+    # Parse date+time reset: "resets Mar 6, 3am (UTC)", "resets Dec 31, 11pm (UTC)"
+    # This format appears when the reset is days away (e.g. weekly/monthly quota resets).
+    # Without this parser, the "hit your limit" fallback only returns 8 hours, causing
+    # repeated retries when the actual reset is multiple days in the future.
+    m = _re.search(
+        r"resets\s+([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{1,2})\s*(am|pm)\s*\(?UTC\)?",
+        error_str, _re.IGNORECASE,
+    )
+    if m:
+        try:
+            import calendar as _cal
+            month_str = m.group(1)[:3].lower()
+            _month_abbrs = {mn.lower(): i for i, mn in enumerate(_cal.month_abbr) if mn}
+            month_num = _month_abbrs.get(month_str)
+            if month_num:
+                day = int(m.group(2))
+                hour = int(m.group(3))
+                period = m.group(4).lower()
+                if period == "pm" and hour != 12:
+                    hour += 12
+                elif period == "am" and hour == 12:
+                    hour = 0
+                now_utc = _dt.datetime.now(_dt.timezone.utc)
+                reset_time = now_utc.replace(
+                    month=month_num, day=day, hour=hour, minute=0, second=0, microsecond=0
+                )
+                if reset_time <= now_utc:
+                    reset_time = reset_time.replace(year=now_utc.year + 1)
+                return (reset_time - now_utc).total_seconds()
+        except (ValueError, TypeError):
+            pass
+
     # Final fallback: "hit your limit" or "you have hit your limit".
     # These phrases appear in OpenRouter/Anthropic daily rate limit errors when a
     # specific reset time is absent or the above patterns failed to match (e.g.
@@ -430,3 +462,37 @@ def is_rate_limit_error(exc: Exception) -> bool:
         or "rate limit" in error_str.lower()
         or "too many requests" in error_str.lower()
     )
+
+
+# Phrases that indicate a DAILY quota exhaustion (not just a transient rate window).
+# These appear when the API has exhausted the user's daily token/request limit,
+# as opposed to per-minute/per-hour windows that resolve quickly.
+_DAILY_LIMIT_PHRASES = (
+    "hit your limit",
+    "you have hit your limit",
+    "quota exceeded",
+    "daily limit",
+    "daily quota",
+    "exceeded your",
+)
+
+
+def is_daily_limit_error(exc: Exception) -> bool:
+    """Return True if the exception indicates a daily API quota exhaustion.
+
+    Distinguishes *daily* limits (full quota for the day used up) from transient
+    *rate-window* limits (too many requests per minute/hour).  Daily limits should
+    trigger an immediate fail-fast even when the reset time is close (e.g.,
+    "resets 1am (UTC)" with only 2 minutes remaining), because:
+
+    - The worker should not block for 2+ minutes waiting to retry.
+    - The next evolution cycle will naturally retry after the reset.
+    - Spinning retries wastes budget and log space.
+
+    Examples of daily limit messages:
+    - "Rate limit: You've hit your limit · resets 1am (UTC)"
+    - "You have hit your limit for today"
+    - "Quota exceeded for the day"
+    """
+    error_lower = repr(exc).lower()
+    return any(phrase in error_lower for phrase in _DAILY_LIMIT_PHRASES)
