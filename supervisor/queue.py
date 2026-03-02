@@ -383,29 +383,54 @@ def queue_review_task(reason: str, force: bool = False) -> Optional[str]:
 def _check_rate_limit_window(drive_root: pathlib.Path) -> Optional[float]:
     """Return seconds remaining in a daily rate-limit window, or None if not rate-limited.
 
-    Scans the last 200 lines of events.jsonl for ``llm_api_error`` events with
-    ``daily_limit=True``.  If the most-recent such event's reset time is still in
-    the future we are still inside the rate-limit window and evolution should be
-    deferred.
+    Checks in order:
+    1. state.json ``daily_rate_limit_reset_at_utc`` key (persisted across restarts).
+    2. Scan last 500 lines of events.jsonl for ``llm_api_error`` events with
+       ``daily_limit=True`` or ``consciousness_rate_limit`` events.
 
-    The reset time is reconstructed as: event_timestamp + resets_in_sec.
-    ``resets_in_sec`` is set by ``extract_retry_after()`` in utils.py which
-    converts wall-clock reset times ("resets 8pm UTC") to absolute seconds,
-    so adding it to the event timestamp gives the correct reset epoch.
+    The state.json check is authoritative and survives container restarts, preventing
+    evolution from re-starting during a multi-day rate limit window (e.g., "resets
+    Mar 6, 3am UTC") when events.jsonl has grown beyond the 500-line scan window.
 
     Returns None if no active rate limit window is found (safe to proceed).
     """
+    now = time.time()
+
+    # --- Fast path: check persisted reset time in state.json ---
+    try:
+        state_path = drive_root / "state" / "state.json"
+        if state_path.exists():
+            _st = json.loads(state_path.read_text(encoding="utf-8"))
+            _reset_at_str = str(_st.get("daily_rate_limit_reset_at_utc") or "").strip()
+            if _reset_at_str:
+                _reset_at = datetime.datetime.fromisoformat(
+                    _reset_at_str.replace("Z", "+00:00")
+                ).timestamp()
+                if _reset_at > now:
+                    return _reset_at - now  # still inside the rate-limit window
+                # Window has passed — clear the stale key to avoid repeated checks
+                try:
+                    del _st["daily_rate_limit_reset_at_utc"]
+                    import os as _os_rl
+                    _tmp = state_path.with_suffix(".json.tmp")
+                    _tmp.write_text(json.dumps(_st, ensure_ascii=False, indent=2), encoding="utf-8")
+                    _os_rl.rename(_tmp, state_path)
+                except Exception:
+                    log.debug("Failed to clear stale rate_limit_reset_at_utc from state.json", exc_info=True)
+    except Exception:
+        log.debug("Failed to check state.json for rate limit window", exc_info=True)
+
+    # --- Fallback: scan events.jsonl ---
     events_path = drive_root / "logs" / "events.jsonl"
     if not events_path.exists():
         return None
     try:
         import subprocess as _sp_rl
         _tail = _sp_rl.run(
-            ["tail", "-n", "200", str(events_path)],
+            ["tail", "-n", "500", str(events_path)],
             capture_output=True, text=True, timeout=10,
         )
         lines = (_tail.stdout or "").splitlines()
-        now = time.time()
         for line in reversed(lines):
             line = line.strip()
             if not line:

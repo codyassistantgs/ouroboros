@@ -532,6 +532,9 @@ class OuroborosAgent:
             # Propagate daily rate-limit flag so _handle_task_done can skip the
             # circuit breaker when the model ran fine but hit a daily limit later.
             "daily_rate_limit": bool(usage.get("daily_rate_limit")),
+            # Propagate reset time so supervisor can persist it to state.json
+            # for cross-restart rate-limit window detection.
+            "rate_limit_resets_at_utc": usage.get("rate_limit_resets_at_utc") or "",
             "ts": utc_now_iso(),
         })
         append_jsonl(drive_logs / "events.jsonl", {

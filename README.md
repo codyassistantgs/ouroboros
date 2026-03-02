@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.28 |[Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.30 |[Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,18 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.30 -- persist rate-limit window to state.json for cross-restart resilience
+
+- **Fix:** `_check_rate_limit_window` in `queue.py` now first checks `state.json` for a persisted `daily_rate_limit_reset_at_utc` key before scanning `events.jsonl`. This prevents evolution from restarting after a container restart during a multi-day rate limit window (e.g., "resets Mar 6, 3am UTC") because the window is now persisted in `state.json` rather than only in the last 200 lines of `events.jsonl`.
+- **Fix:** `_handle_task_done` in `events.py` writes the rate limit reset time to `state.json` when `daily_rate_limit=True`, so the information survives restarts.
+- **Fix:** `agent.py` and `consciousness.py` now propagate `rate_limit_resets_at_utc` for accurate window persistence.
+- **Fix:** README version badge updated to match VERSION file (test `test_version_in_readme` was failing because v7.1.29 commit forgot to update README).
+
+### v7.1.29 -- fix rate limit — parse date+time reset format 'resets Mar 6, 3am (UTC)'
+
+- **Fix:** `extract_retry_after` in `utils.py` now parses full date+time reset strings like `"resets Mar 6, 3am (UTC)"`. Previously, only same-day wall-clock resets (e.g., `"resets 8pm (UTC)"`) were parsed; multi-day resets fell through to the 8-hour fallback, causing evolution to re-run after 8 hours even though the actual reset was days away.
+- **Tests:** Added `test_resets_mar_6_3am_utc_returns_large_value` and `test_resets_date_time_format_more_accurate_than_fallback` for the new date+time parsing path.
 
 ### v7.1.14 -- head+tail tool result truncation + version sync fix
 

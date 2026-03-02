@@ -149,6 +149,17 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                     "task_id": task_id,
                 },
             )
+            # Persist rate-limit reset time to state.json so _check_rate_limit_window
+            # can detect active windows even after a container restart (when events.jsonl
+            # is fresh and the old rate-limit event is no longer in the 200-line scan).
+            if _daily_rate_limit:
+                _reset_at = str(evt.get("rate_limit_resets_at_utc") or "").strip()
+                if _reset_at:
+                    try:
+                        st["daily_rate_limit_reset_at_utc"] = _reset_at
+                        ctx.save_state(st)
+                    except Exception:
+                        log.debug("Failed to persist rate_limit_reset_at_utc to state.json", exc_info=True)
         elif _text_success:
             # Meaningful text response but no commits yet — not failed, just no code change
             st["evolution_consecutive_failures"] = 0

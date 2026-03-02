@@ -331,14 +331,30 @@ class BackgroundConsciousness:
             # Transient rate limit — triple interval up to 1 hour.
             self._next_wakeup_sec = min(self._next_wakeup_sec * 3, 3600)
         _ra_log = _ra if (_ra is not None and _ra > 0) else None
+        _is_daily = is_daily_limit_error(e)
         append_jsonl(self._drive_root / "logs" / "events.jsonl", {
             "ts": utc_now_iso(),
             "type": "consciousness_rate_limit",
             "error": error_str,
             "next_wakeup_sec": self._next_wakeup_sec,
             "retry_after_sec": _ra_log,
-            "daily_limit": is_daily_limit_error(e),
+            "daily_limit": _is_daily,
         })
+        # Persist rate-limit reset time to state.json for cross-restart window detection.
+        # Without this, a container restart during a multi-day rate limit would lose
+        # the window knowledge and allow evolution to restart immediately.
+        if _is_daily and (_ra is not None and _ra > 1800):
+            try:
+                import datetime as _dt_rl
+                from supervisor.state import load_state, save_state
+                _resets_at = _dt_rl.datetime.now(_dt_rl.timezone.utc) + _dt_rl.timedelta(seconds=float(_ra))
+                _resets_at_iso = _resets_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+                _st = load_state()
+                _st["daily_rate_limit_reset_at_utc"] = _resets_at_iso
+                save_state(_st)
+                log.info("consciousness: persisted rate limit reset time %s to state.json", _resets_at_iso)
+            except Exception:
+                log.debug("consciousness: failed to persist rate limit reset time to state.json", exc_info=True)
 
     def _think(self, _retry_attempt: int = 0) -> None:
         """One thinking cycle: build context, call LLM, execute tools iteratively.
