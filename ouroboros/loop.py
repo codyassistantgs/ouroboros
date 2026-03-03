@@ -531,8 +531,10 @@ def _maybe_compact_messages(
 def _evolution_no_response_msg(active_model: str, max_retries: int, accumulated_usage: Dict[str, Any]) -> str:
     """Build an informative message when an evolution task gets no LLM response.
 
-    Returns a specific 'paused: rate limit' message when a daily rate limit caused
-    the failure, falling back to the generic 'empty response' message otherwise.
+    Returns a specific message for:
+    - daily rate limit: paused with reset time
+    - transient server error (504/502/503): temporary infra outage, will retry
+    - other: generic empty-response message
     """
     if accumulated_usage.get("daily_rate_limit"):
         ra_sec = float(accumulated_usage.get("rate_limit_resets_in_sec") or 28800)
@@ -541,6 +543,12 @@ def _evolution_no_response_msg(active_model: str, max_retries: int, accumulated_
         return (
             f"⚠️ Evolution paused: daily API rate limit hit. "
             f"Resets in ~{hours:.1f}h (at {resets_at}). Will resume automatically."
+        )
+    if accumulated_usage.get("had_transient_server_error"):
+        return (
+            f"⚠️ Evolution: temporary infrastructure error (504/5xx gateway timeout) "
+            f"after {max_retries} attempts. Circuit breaker NOT tripped — "
+            f"will retry on next evolution cycle."
         )
     return (
         f"⚠️ Evolution: model {active_model} returned empty response after {max_retries} attempts. "
@@ -798,8 +806,20 @@ def _call_llm_with_retry(
     """
     msg = None
     last_error: Optional[Exception] = None
+    # Allow 2 extra retry attempts if ALL failures so far are transient server
+    # errors (504/502/503).  "Claude CLI timeout" (504) means the proxy killed
+    # its subprocess — the proxy needs extra time to respawn and recover.
+    # Extra retries only help when non-transient errors have NOT occurred
+    # (rate limits are handled separately and return early; logic errors are
+    # not worth burning time on with extra retries).
+    _tse_max = max_retries + 2
+    _all_tse_so_far = True  # becomes False when a non-TSE error is seen
 
-    for attempt in range(max_retries):
+    for attempt in range(_tse_max):
+        # Stop once we've exceeded regular retries AND had non-TSE errors.
+        # (Pure TSE runs get to use all _tse_max attempts.)
+        if attempt >= max_retries and not _all_tse_so_far:
+            break
         try:
             kwargs = {"messages": messages, "model": model, "reasoning_effort": effort}
             if tools:
@@ -868,6 +888,8 @@ def _call_llm_with_retry(
             last_error = e
             rl = is_rate_limit_error(e)
             tse = is_transient_server_error(e)
+            if not tse:
+                _all_tse_so_far = False
             if rl:
                 ra = extract_retry_after(e)
                 daily = is_daily_limit_error(e)
@@ -893,24 +915,38 @@ def _call_llm_with_retry(
                 # Larger base (10s) and longer cap (120s) because "Claude CLI timeout"
                 # (504) means the proxy subprocess was killed — it needs more recovery
                 # time than a quick 5-second wait to free resources and accept the next request.
+                # With _tse_max = max_retries + 2, pure-TSE runs get 2 extra attempts.
                 sleep_sec = min(10 * (2 ** attempt), 120)
-                log.warning("Transient server error (5xx/gateway), attempt %d/%d, sleeping %.0fs: %s",
-                            attempt + 1, max_retries, sleep_sec if attempt < max_retries - 1 else 0,
-                            repr(e)[:200])
+                # Determine whether a sleep will actually follow this log line
+                _is_last_attempt = (
+                    attempt >= _tse_max - 1
+                    or (not _all_tse_so_far and attempt >= max_retries - 1)
+                )
+                log.warning(
+                    "Transient server error (5xx/gateway), attempt %d/%d+2, sleeping %.0fs: %s",
+                    attempt + 1, max_retries,
+                    sleep_sec if not _is_last_attempt else 0,
+                    repr(e)[:200],
+                )
                 # Mark accumulated_usage so circuit breaker is not tripped even if some
                 # rounds already succeeded before the transient error hit.
                 accumulated_usage["had_transient_server_error"] = True
             else:
                 sleep_sec = min(2 ** attempt * 2, 30)
+            # Compute whether we will sleep after logging
+            _is_last_attempt = (
+                attempt >= _tse_max - 1
+                or (not _all_tse_so_far and attempt >= max_retries - 1)
+            )
             append_jsonl(drive_logs / "events.jsonl", {
                 "ts": utc_now_iso(), "type": "llm_api_error",
                 "task_id": task_id, "round": round_idx, "attempt": attempt + 1,
                 "model": model, "error": repr(e),
                 "is_rate_limit": rl,
                 "is_transient_server_error": tse,
-                "sleep_sec": sleep_sec if attempt < max_retries - 1 else 0,
+                "sleep_sec": sleep_sec if not _is_last_attempt else 0,
             })
-            if attempt < max_retries - 1:
+            if not _is_last_attempt:
                 if rl:
                     log.warning("Rate limit (attempt %d/%d), sleeping %.0fs", attempt + 1, max_retries, sleep_sec)
                 time.sleep(sleep_sec)

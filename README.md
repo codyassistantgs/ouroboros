@@ -9,7 +9,7 @@ A self-developing AI agent that writes its own code, improves itself, and mainta
 
 A helpful AI with a constitution, background consciousness, and persistent identity across restarts.
 
-**Version:** 7.1.37 |[Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
+**Version:** 7.1.39 |[Landing Page](https://jkee.github.io/ouroboros/) | Originally developed at [joi-lab](https://github.com/joi-lab)
 
 ---
 
@@ -221,6 +221,13 @@ Full text: [BIBLE.md](BIBLE.md)
 ---
 
 ## Changelog
+
+### v7.1.39 -- improve 504/5xx transient error resilience
+
+- **Fix:** `is_transient_server_error` in `utils.py` now also detects HTTP 503 (Service Unavailable) and "upstream connect error" responses, broadening the set of transient infrastructure errors that get retry treatment instead of being treated as logic failures.
+- **Fix:** `_call_llm_with_retry` in `loop.py` now grants 2 extra retry attempts when ALL failures in a call are transient server errors (504/502/503). Previously, pure-TSE runs were capped at `max_retries=3` (30s total backoff) even though a "Claude CLI timeout" means the proxy subprocess was killed and may need 60+ seconds to recover. Now TSE-only runs get up to 5 attempts.
+- **Fix:** `_evolution_no_response_msg` in `loop.py` now returns a clear message when `had_transient_server_error` is set, distinguishing it from "empty response" (which suggests a model logic problem). Previously, both 504 timeouts and truly empty responses produced the same misleading "model returned empty response" message.
+- **Fix:** README version badge updated to match VERSION file.
 
 ### v7.1.37 -- fix _persist_ra threshold to use actual short reset times
 

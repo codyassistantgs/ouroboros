@@ -518,22 +518,27 @@ def persist_daily_rate_limit_reset(
 def is_transient_server_error(exc: Exception) -> bool:
     """Return True if the exception is a transient 5xx server/gateway error.
 
-    Detects proxy and upstream timeout errors (504) or bad gateway (502) responses.
-    These are temporary infrastructure problems that warrant retry with longer delays,
-    but should NOT be treated as rate limits or returned as evolution targets.
+    Detects proxy and upstream timeout errors (504), bad gateway (502), and
+    service unavailable (503) responses.  These are temporary infrastructure
+    problems that warrant retry with longer delays, but should NOT be treated
+    as rate limits or returned as evolution targets.
 
     Examples:
     - InternalServerError("Error code: 504 - {'detail': 'Claude CLI timeout'}")
     - InternalServerError("Error code: 502 - {'detail': 'Bad Gateway'}")
+    - InternalServerError("Error code: 503 - {'detail': 'Service Unavailable'}")
     """
     error_str = repr(exc)
     error_lower = error_str.lower()
     return (
         "504" in error_str
         or "502" in error_str
+        or "503" in error_str
         or "claude cli timeout" in error_lower
         or "gateway timeout" in error_lower
         or "bad gateway" in error_lower
+        or "service unavailable" in error_lower
+        or "upstream connect error" in error_lower
     )
 
 
